@@ -1,0 +1,18 @@
+{
+  "name": "guardian-basic-vault",
+  "version": "1.0.0",
+  "description": "خزانة البيانات الأساسية - نسخة نجم الإبداع",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "firebase-admin": "^12.0.0",
+    "libphonenumber-js": "^1.10.44",
+    "express": "^4.18.2",
+    "qrcode": "^1.5.3",
+    "pino": "^9.0.0",
+    "dotenv": "^16.3.1"
+  }
+}
