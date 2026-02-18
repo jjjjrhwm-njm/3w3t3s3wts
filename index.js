@@ -1,294 +1,345 @@
-require("dotenv").config();
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
-const { parsePhoneNumberFromString } = require('libphonenumber-js');
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
+    fetchLatestBaileysVersion, 
+    DisconnectReason 
+} = require("@whiskeysockets/baileys");
+const { Boom } = require("@hapi/boom");
 const admin = require("firebase-admin");
 const express = require("express");
 const QRCode = require("qrcode");
-const pino = require("pino");
 const fs = require("fs");
+const pino = require("pino");
+const https = require("https");
 const path = require("path");
 
 const app = express();
-const port = process.env.PORT || 10000;
+app.use(express.json());
 
-const OWNER_JID = (process.env.OWNER_NUMBER || "966554526287") + "@s.whatsapp.net";
-let sock, qrCodeImage, isConnected = false;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
+let sock;
+let qrImage = ""; 
+let isStarting = false;
+const tempCodes = new Map(); 
+const userState = new Map(); 
+const myNumber = "966554526287"; // تم التغيير إلى رقمك
 
-// --- 1. تهيئة Firebase ---
-if (process.env.FIREBASE_CONFIG && !admin.apps.length) {
+// --- 1. إعداد Firebase ---
+const firebaseConfig = process.env.FIREBASE_CONFIG;
+if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(firebaseConfig);
+    admin.initializeApp({ 
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+    });
+}
+const db = admin.firestore();
+
+// --- 2. النبض الحديدي (كل 10 دقائق) ---
+setInterval(() => {
+    const host = process.env.RENDER_EXTERNAL_HOSTNAME;
+    if (host) {
+        https.get(`https://${host}/ping`, (res) => {
+            console.log(`💓 نبض النظام: مستقر ${res.statusCode}`);
+        }).on('error', () => {});
+    }
+}, 10 * 60 * 1000);
+
+// دالة الإرسال الآمن لضمان عدم الانهيار
+async function safeSend(jid, content) {
     try {
-        const cert = JSON.parse(process.env.FIREBASE_CONFIG);
-        admin.initializeApp({ credential: admin.credential.cert(cert) });
-        console.log("✅ Firebase initialized");
-    } catch (e) { console.error("⚠️ خطأ في تشغيل Firebase:", e.message); }
+        if (sock && sock.user) {
+            return await sock.sendMessage(jid, content);
+        }
+    } catch (e) { console.log("⚠️ فشل الإرسال: السوكيت مغلق"); }
 }
 
-// --- 2. محرك الأرقام الذكي ---
-const smartFormat = (phone) => {
-    if (!phone) return "";
-    let clean = phone.replace(/\D/g, "").trim();
-    const regions = ['SA', 'YE', 'EG', 'SY', 'IQ', 'JO', 'AE', 'KW'];
-    for (let r of regions) {
-        const p = parsePhoneNumberFromString(clean, r);
-        if (p && p.isValid()) return p.format('E.164').replace('+', '');
+function normalizePhone(phone) {
+    let clean = phone.replace(/\D/g, ''); 
+    if (clean.startsWith('00')) clean = clean.substring(2);
+    if (clean.startsWith('0')) clean = clean.substring(1);
+    if (clean.length === 9 && clean.startsWith('5')) clean = '966' + clean;
+    else if (clean.length === 9 && /^(77|73|71|70)/.test(clean)) clean = '967' + clean;
+    else if (clean.length === 8 && /^[34567]/.test(clean)) clean = '974' + clean;
+    return clean + "@s.whatsapp.net";
+}
+
+// --- 3. دالة استعادة الهوية من Firebase ---
+async function restoreIdentity() {
+    try {
+        const authDir = './auth_info_stable';
+        const credPath = path.join(authDir, 'creds.json');
+        
+        // التحقق من وجود الهوية في Firebase
+        const sessionDoc = await db.collection('session').doc('session_vip_rashed').get();
+        
+        if (sessionDoc.exists) {
+            // إنشاء المجلد إذا لم يكن موجوداً
+            if (!fs.existsSync(authDir)) {
+                fs.mkdirSync(authDir, { recursive: true });
+            }
+            
+            // كتابة الهوية المستعادة
+            fs.writeFileSync(credPath, JSON.stringify(sessionDoc.data()));
+            console.log("✅ تم استعادة هوية رقم 966554526287 بنجاح");
+            return true;
+        } else {
+            console.log("⚠️ لا توجد هوية محفوظة في Firebase");
+            return false;
+        }
+    } catch (error) {
+        console.log("❌ فشل استعادة الهوية:", error.message);
+        return false;
     }
-    return clean;
-};
+}
 
-// --- 3. نظام استعادة الهوية ---
-async function syncSession(action) {
-    if (!admin.apps.length) return;
-    const db = admin.firestore().collection('session').doc('session_vip_rashed');
-    const authDir = './auth_info';
-    const credPath = path.join(authDir, 'creds.json');
+// --- 4. دالة حفظ الهوية في Firebase ---
+async function saveIdentity() {
+    try {
+        const authDir = './auth_info_stable';
+        const credPath = path.join(authDir, 'creds.json');
+        
+        if (fs.existsSync(credPath)) {
+            const creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+            await db.collection('session').doc('session_vip_rashed').set(creds, { merge: true });
+            console.log("✅ تم حفظ الهوية في Firebase");
+        }
+    } catch (error) {
+        console.log("❌ فشل حفظ الهوية:", error.message);
+    }
+}
 
-    if (action === 'restore') {
-        try {
-            const doc = await db.get();
-            if (doc.exists) {
-                if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
-                fs.writeFileSync(credPath, JSON.stringify(doc.data()));
-                console.log("✅ تم سحب هويتك الأصلية من Firebase بنجاح");
+// --- 5. محرك معالجة الأوامر المدمج ---
+async function processCommand(jid, text, sender, isMe) {
+    // 🛑 حماية مدمجة: منع البوت من الرد على إشعاراته الخاصة
+    const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
+    if (isMe && botTokens.some(token => text.includes(token))) return true;
+
+    // السماح فقط للإدمن (رقمك)
+    if (sender !== myNumber && !isMe) return false;
+
+    const currentState = userState.get(jid);
+
+    // معالجة الحالات النشطة
+    if (currentState) {
+        if (text.toLowerCase() === "خروج") {
+            userState.delete(jid);
+            await safeSend(jid, { text: "❌ تم إلغاء العملية والعودة للوضع الطبيعي." });
+            return true;
+        }
+
+        if (currentState.command === "نشر") {
+            // خطوة 1: استلام الرابط
+            if (currentState.step === "waiting_link") {
+                if (!text.startsWith('http')) {
+                    await safeSend(jid, { text: "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http" });
+                    return true;
+                }
+                currentState.link = text;
+                currentState.step = "waiting_desc";
+                userState.set(jid, currentState);
+                await safeSend(jid, { text: "✅ تم استلام الرابط. الآن أرسل *الوصف*:" });
                 return true;
             }
-        } catch (e) { console.log("❌ فشل استعادة الهوية:", e.message); }
-    } else if (action === 'save') {
-        try {
-            if (fs.existsSync(credPath)) {
-                const creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
-                await db.set(creds, { merge: true });
-            }
-        } catch (e) {}
-    }
-    return false;
-}
 
-// --- 4. مسار check-device ---
-app.get("/check-device", async (req, res) => {
-    try {
-        const deviceId = req.query.id;
-        const appName = req.query.appName || "default";
-        
-        console.log(`🔍 فحص الجهاز: ${deviceId}`);
-        
-        const deviceDoc = await admin.firestore().collection('allowed_devices').doc(deviceId).get();
-        
-        if (deviceDoc.exists) {
-            console.log(`✅ الجهاز موثوق: ${deviceId}`);
-            return res.status(200).send("Verified");
-        } else {
-            console.log(`⚠️ جهاز غير موثوق: ${deviceId}`);
-            return res.status(404).send("Device not verified");
-        }
-    } catch (error) {
-        console.error("❌ خطأ في check-device:", error);
-        res.status(500).send("Error");
-    }
-});
-
-// --- 5. طلب الكود ---
-app.get("/request-otp", async (req, res) => {
-    try {
-        const formattedPhone = smartFormat(req.query.phone);
-        const deviceId = req.query.deviceId;
-        const userName = req.query.name || 'مستخدم';
-        const appName = req.query.app || 'default';
-        
-        console.log(`📱 طلب كود: ${formattedPhone} للجهاز: ${deviceId}`);
-        
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        // ✅ استخدام deviceId فقط كمفتاح رئيسي (كما في تطبيقك)
-        await admin.firestore().collection('pending_otps').doc(deviceId).set({ 
-            phone: formattedPhone,
-            code: code,
-            deviceId: deviceId,
-            userName: userName,
-            appName: appName,
-            timestamp: admin.firestore.FieldValue.serverTimestamp()
-        });
-        
-        // ✅ أيضاً نخزن برقم الهاتف للبحث السريع (مهم جداً)
-        await admin.firestore().collection('phone_codes').doc(formattedPhone).set({
-            deviceId: deviceId,
-            code: code,
-            timestamp: admin.firestore.FieldValue.serverTimestamp()
-        });
-        
-        if (isConnected && sock) {
-            try {
-                await sock.sendMessage(formattedPhone + "@s.whatsapp.net", { 
-                    text: `مرحباً ${userName}،\n\n📱 كود التفعيل الخاص بك هو:\n🔑 ${code}\n\nأدخل هذا الكود في التطبيق.`
-                });
+            // خطوة 2: استلام الوصف
+            if (currentState.step === "waiting_desc") {
+                currentState.desc = text;
+                currentState.step = "waiting_target";
+                userState.set(jid, currentState);
                 
-                await sock.sendMessage(OWNER_JID, { 
-                    text: `🔔 طلب تفعيل جديد\n👤 المستخدم: ${userName}\n📱 الرقم: ${formattedPhone}\n🔑 الكود: ${code}\n📱 الجهاز: ${deviceId}`
-                });
-            } catch (e) {}
-        }
-        
-        res.status(200).send("OK");
-        
-    } catch (error) {
-        console.error("❌ خطأ:", error);
-        res.status(500).send("Error");
-    }
-});
-
-// --- 6. التحقق من الكود (معدل حسب طلبك) ---
-app.get("/verify-otp", async (req, res) => {
-    try {
-        const formattedPhone = smartFormat(req.query.phone);
-        const inputCode = req.query.code ? req.query.code.toString().trim() : "";
-        
-        console.log(`🔍 محاولة تحقق: الرقم ${formattedPhone}، الكود: ${inputCode}`);
-        
-        // ✅ 1. البحث عن الكود باستخدام رقم الهاتف أولاً
-        const phoneCodeDoc = await admin.firestore().collection('phone_codes').doc(formattedPhone).get();
-        
-        if (!phoneCodeDoc.exists) {
-            console.log(`❌ لا يوجد كود للرقم: ${formattedPhone}`);
-            return res.status(401).send("Error");
-        }
-        
-        const phoneData = phoneCodeDoc.data();
-        const deviceId = phoneData.deviceId;
-        const storedCode = phoneData.code.toString().trim();
-        
-        console.log(`📱 found deviceId: ${deviceId}, storedCode: ${storedCode}`);
-        
-        // ✅ 2. التحقق من وقت الصلاحية (10 دقائق)
-        const timestamp = phoneData.timestamp?.toDate?.() || new Date();
-        const now = new Date();
-        const diffMinutes = (now - timestamp) / (1000 * 60);
-        
-        if (diffMinutes > 10) {
-            console.log(`⏰ الكود منتهي الصلاحية`);
-            await phoneCodeDoc.ref.delete();
-            await admin.firestore().collection('pending_otps').doc(deviceId).delete();
-            return res.status(401).send("Error");
-        }
-        
-        // ✅ 3. مقارنة الكود
-        if (storedCode === inputCode) {
-            console.log(`✅ تحقق ناجح للرقم: ${formattedPhone}`);
-            
-            // تسجيل الجهاز الموثوق
-            await admin.firestore().collection('allowed_devices').doc(deviceId).set({ 
-                phone: formattedPhone,
-                userName: "مستخدم",
-                verifiedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            
-            // تنظيف البيانات المؤقتة
-            await phoneCodeDoc.ref.delete();
-            await admin.firestore().collection('pending_otps').doc(deviceId).delete();
-            
-            // إرسال تأكيد
-            if (isConnected && sock) {
-                await sock.sendMessage(OWNER_JID, { 
-                    text: `✅ تم تفعيل جهاز جديد\n📱 الرقم: ${formattedPhone}`
-                });
+                const snap = await db.collection('users').get();
+                let apps = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
+                let menu = "🎯 *اختر الجمهور المستهدف:*\n\n0 - 🌐 إرسال للجميع\n";
+                apps.forEach((n, i) => menu += `${i + 1} - 📱 مستخدمي [${n}]\n`);
+                await safeSend(jid, { text: menu + "\n💡 أرسل رقم الخيار المطلوب." });
+                return true;
             }
-            
-            return res.status(200).send("Verified");
-        } else {
-            console.log(`❌ كود غير صحيح: المدخل ${inputCode} ≠ المخزن ${storedCode}`);
-            return res.status(401).send("Error");
-        }
-        
-    } catch (error) {
-        console.error("❌ خطأ:", error);
-        res.status(500).send("Error");
-    }
-});
 
-// --- 7. تشغيل البوت ---
-async function start() {
-    try {
-        await syncSession('restore');
-        
-        if (!fs.existsSync('./auth_info')) {
-            fs.mkdirSync('./auth_info', { recursive: true });
-        }
+            // خطوة 3: التنفيذ النهائي
+            if (currentState.step === "waiting_target") {
+                const snap = await db.collection('users').get();
+                let appsArr = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
+                let targets = [];
 
-        const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-        const { version } = await fetchLatestBaileysVersion();
-
-        sock = makeWASocket({ 
-            version,
-            auth: state, 
-            printQRInTerminal: false,
-            logger: pino({ level: "silent" }),
-            browser: ["Guardian VIP", "Chrome", "1.0.0"],
-            connectTimeoutMs: 30000,
-            defaultQueryTimeoutMs: 0,
-            keepAliveIntervalMs: 30000
-        });
-
-        sock.ev.on('creds.update', async () => { 
-            await saveCreds(); 
-            await syncSession('save'); 
-        });
-
-        sock.ev.on('connection.update', (u) => {
-            const { connection, qr, lastDisconnect } = u;
-            
-            if (qr) {
-                QRCode.toDataURL(qr, (err, url) => { 
-                    qrCodeImage = url; 
-                    console.log("📱 تم تحديث QR code");
-                });
-            }
-            
-            if (connection === 'open') { 
-                isConnected = true; 
-                qrCodeImage = "DONE"; 
-                reconnectAttempts = 0;
-                console.log("🛡️ الحارس متصل الآن");
-            }
-            
-            if (connection === 'close') {
-                isConnected = false;
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                
-                if (statusCode === DisconnectReason.loggedOut) {
-                    console.log("❌ تم تسجيل الخروج");
-                    try {
-                        fs.rmSync('./auth_info', { recursive: true, force: true });
-                        qrCodeImage = null;
-                    } catch (e) {}
+                if (text === "0") { 
+                    targets = snap.docs; 
                 } else {
-                    reconnectAttempts++;
-                    if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
-                        console.log(`🔄 محاولة استعادة الاتصال (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-                        setTimeout(start, 5000);
+                    const idx = parseInt(text) - 1;
+                    if (isNaN(idx) || !appsArr[idx]) {
+                        await safeSend(jid, { text: "❌ رقم غير صحيح. اختر من القائمة أو أرسل *خروج*:" });
+                        return true;
                     }
+                    targets = snap.docs.filter(d => (d.data().appName || "عام") === appsArr[idx]);
                 }
-            }
-        });
 
-    } catch (error) {
-        console.error("❌ خطأ:", error);
-        setTimeout(start, 10000);
+                await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length} مستخدم...` });
+                
+                let successCount = 0;
+                for (const d of targets) {
+                    try {
+                        await safeSend(normalizePhone(d.data().phone), { 
+                            text: `📢 *تحديث جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
+                        });
+                        successCount++;
+                    } catch (e) {}
+                }
+                
+                userState.delete(jid);
+                await safeSend(jid, { text: `✅ تم النشر بنجاح لـ ${successCount} من أصل ${targets.length} مستخدم!` });
+                return true;
+            }
+        }
+        return true;
     }
+
+    // الأوامر التي تبدأ بـ "نجم"
+    if (!text.startsWith("نجم")) return false;
+
+    switch (text) {
+        case "نجم":
+        case "نجم مساعدة":
+            await safeSend(jid, { text: `🌟 *أوامر نجم الإبداع:*
+
+1️⃣ *نجم نشر* - إعلان تفاعلي (3 خطوات)
+2️⃣ *نجم احصا* - إحصائيات المستخدمين
+3️⃣ *نجم بنج* - فحص سرعة الاتصال
+
+💡 أرسل *خروج* للإلغاء أثناء النشر.` });
+            break;
+            
+        case "نجم نشر":
+            userState.set(jid, { command: "نشر", step: "waiting_link" });
+            await safeSend(jid, { text: "🔗 *خطوة 1/3*\nأرسل *رابط التطبيق* الآن:" });
+            break;
+            
+        case "نجم احصا":
+            const snap = await db.collection('users').get();
+            await safeSend(jid, { text: `📊 إجمالي الموثقين: ${snap.size}` });
+            break;
+            
+        case "نجم بنج":
+            const start = Date.now();
+            await safeSend(jid, { text: "🏓 جاري الفحص..." });
+            await safeSend(jid, { text: `✅ الاستجابة: ${Date.now() - start}ms` });
+            break;
+    }
+    return true;
 }
 
-// --- 8. الصفحة الرئيسية ---
-app.get("/", (req, res) => {
-    if (isConnected) {
-        res.send(`<h1 style='color:green;text-align:center;'>✅ النظام يعمل</h1>`);
-    } else if (qrCodeImage && qrCodeImage !== "DONE") {
-        res.send(`<div style='text-align:center;'><h1>مسح QR code</h1><img src="${qrCodeImage}"></div>`);
-    } else {
-        res.send(`<h1 style='text-align:center;'>⏳ جاري التحميل...</h1>`);
-    }
+async function startBot() {
+    if (isStarting) return;
+    isStarting = true;
+
+    const folder = './auth_info_stable';
+    if (!fs.existsSync(folder)) fs.mkdirSync(folder);
+    
+    // ✅ استعادة الهوية قبل بدء التشغيل
+    await restoreIdentity();
+    
+    try {
+        const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
+        if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
+    } catch (e) {}
+    
+    const { state, saveCreds } = await useMultiFileAuthState(folder);
+    const { version } = await fetchLatestBaileysVersion();
+    
+    sock = makeWASocket({ 
+        version, 
+        auth: state, 
+        logger: pino({ level: "silent" }), 
+        browser: ["CreativeStar", "Chrome", "1.0"],
+        printQRInTerminal: false, 
+        syncFullHistory: false,
+        connectTimeoutMs: 60000, 
+        keepAliveIntervalMs: 30000
+    });
+
+    sock.ev.on('creds.update', async () => { 
+        await saveCreds(); 
+        await saveIdentity(); // حفظ الهوية عند التحديث
+    });
+
+    sock.ev.on('messages.upsert', async (m) => {
+        try {
+            const msg = m.messages[0];
+            if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+
+            // حماية: تجاهل الرسائل القديمة (أكثر من 15 ثانية)
+            const now = Math.floor(Date.now() / 1000);
+            if (now - msg.messageTimestamp > 15) return;
+
+            const jid = msg.key.remoteJid;
+            const isMe = msg.key.fromMe;
+            const sender = jid.split('@')[0].split(':')[0];
+            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
+
+            if (!text) return;
+
+            // استدعاء المحرك المدمج
+            await processCommand(jid, text, sender, isMe);
+            
+        } catch (e) { console.log("❌ خطأ معالجة:", e.message); }
+    });
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, qr, lastDisconnect } = update;
+        if (qr) qrImage = await QRCode.toDataURL(qr);
+        if (connection === 'open') {
+            qrImage = "DONE";
+            isStarting = false;
+            console.log("🚀 النظام متصل ومستقر بهوية رقم 966554526287");
+            // ترحيب التشغيل
+            setTimeout(() => {
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز للعمل بهويتك!*\nأرسل *نجم* للتحكم." });
+            }, 2000);
+        }
+        if (connection === 'close') {
+            isStarting = false;
+            const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
+            if (code !== DisconnectReason.loggedOut) {
+                console.log("🔄 محاولة إعادة الاتصال...");
+                setTimeout(() => startBot(), 10000);
+            } else {
+                console.log("❌ تم تسجيل الخروج، يلزم مسح QR جديد");
+                try {
+                    fs.rmSync('./auth_info_stable', { recursive: true, force: true });
+                } catch (e) {}
+            }
+        }
+    });
+}
+
+// --- ممرات الـ API المصفحة ---
+app.get("/check-device", async (req, res) => {
+    const { id, appName } = req.query;
+    const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
+    res.status(snap.empty ? 404 : 200).send(snap.empty ? "NOT_FOUND" : "SUCCESS");
 });
 
-// --- 9. بدء التشغيل ---
-app.listen(port, () => {
-    console.log(`🚀 السيرفر يعمل على المنفذ ${port}`);
-    start();
+app.get("/request-otp", async (req, res) => {
+    const { phone, name, app: appName, deviceId } = req.query;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    tempCodes.set(phone, { otp, name, appName, deviceId });
+    try {
+        await safeSend(normalizePhone(phone), { text: `🔐 أهلاً ${name}، كود دخولك لـ [${appName}] هو: *${otp}*` });
+        res.status(200).send("OK");
+    } catch (e) { res.status(500).send("Error"); }
 });
+
+app.get("/verify-otp", async (req, res) => {
+    const { phone, code } = req.query;
+    const data = tempCodes.get(phone);
+    if (data && data.otp === code) {
+        await db.collection('users').doc(phone).set({ 
+            name: data.name, phone, appName: data.appName, deviceId: data.deviceId, date: new Date() 
+        }, { merge: true });
+        tempCodes.delete(phone);
+        await safeSend(normalizePhone(myNumber), { text: `🆕 مستخدم جديد: ${data.name} (${phone})` });
+        res.status(200).send("SUCCESS");
+    } else res.status(401).send("FAIL");
+});
+
+app.get("/ping", (req, res) => res.send("💓"));
+app.get("/", (req, res) => res.send(qrImage === "DONE" ? "✅ Connected" : `<img src="${qrImage}">`));
+app.listen(process.env.PORT || 10000, () => startBot());
