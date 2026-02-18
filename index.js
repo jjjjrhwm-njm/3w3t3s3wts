@@ -22,7 +22,7 @@ if (process.env.FIREBASE_CONFIG && !admin.apps.length) {
     } catch (e) { console.error("⚠️ خطأ في تشغيل Firebase:", e.message); }
 }
 
-// --- 2. محرك الأرقام الذكي (نفسه بدون تغيير) ---
+// --- 2. محرك الأرقام الذكي ---
 const smartFormat = (phone) => {
     if (!phone) return "";
     let clean = phone.replace(/\D/g, "").trim();
@@ -34,7 +34,7 @@ const smartFormat = (phone) => {
     return clean;
 };
 
-// --- 3. نظام استعادة الهوية (نفسه اللي قلت عنه ممتاز - لم نلمسه) ---
+// --- 3. نظام استعادة الهوية (الأولوية القصوى) ---
 async function syncSession(action) {
     if (!admin.apps.length) return;
     const db = admin.firestore().collection('session').doc('session_vip_rashed');
@@ -62,14 +62,13 @@ async function syncSession(action) {
     return false;
 }
 
-// --- 4. معالجة طلبات OTP والتحقق (تم إصلاح منطق البحث فقط) ---
+// --- 4. معالجة طلبات OTP والتحقق ---
 
 app.get("/request-otp", async (req, res) => {
-    const rawPhone = req.query.phone;
-    const formattedPhone = smartFormat(rawPhone);
+    const formattedPhone = smartFormat(req.query.phone);
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // الحفظ باستخدام الرقم المنسق
+    // حفظ الكود كنص لضمان المطابقة الدقيقة
     await admin.firestore().collection('pending_otps').doc(formattedPhone).set({ 
         code: code, 
         deviceId: req.query.deviceId, 
@@ -83,37 +82,70 @@ app.get("/request-otp", async (req, res) => {
     res.status(200).send("OK");
 });
 
+// ✅ التعديل هنا: تغيير طريقة المقارنة لحل مشكلة التحقق
 app.get("/verify-otp", async (req, res) => {
-    const rawPhone = req.query.phone;
-    const formattedPhone = smartFormat(rawPhone);
-    const inputCode = req.query.code ? req.query.code.toString().trim() : "";
-    
-    // محاولة البحث بالرقم المنسق أولاً
-    let doc = await admin.firestore().collection('pending_otps').doc(formattedPhone).get();
-    
-    // إذا لم يجد السجل ( fallback ) يبحث بالرقم المجرد من الرموز
-    if (!doc.exists) {
-        const purePhone = rawPhone.replace(/\D/g, "");
-        doc = await admin.firestore().collection('pending_otps').doc(purePhone).get();
-    }
-
-    if (doc.exists) {
+    try {
+        const formattedPhone = smartFormat(req.query.phone);
+        const inputCode = req.query.code ? req.query.code.toString().trim() : "";
+        
+        console.log(`🔍 محاولة تحقق: الرقم ${formattedPhone}، الكود المدخل: ${inputCode}`);
+        
+        const doc = await admin.firestore().collection('pending_otps').doc(formattedPhone).get();
+        
+        if (!doc.exists) {
+            console.log(`❌ لا يوجد طلب كود للرقم: ${formattedPhone}`);
+            return res.status(401).send("Error: No OTP request found");
+        }
+        
         const storedData = doc.data();
-        // مقارنة مرنة (loose comparison) لضمان القبول
-        if (storedData.code.toString().trim() === inputCode) {
+        
+        // تحويل الكود المخزن إلى نص بشكل آمن
+        let storedCode = "";
+        if (storedData.code !== null && storedData.code !== undefined) {
+            storedCode = storedData.code.toString().trim();
+        }
+        
+        console.log(`📦 الكود المخزن: ${storedCode}`);
+        console.log(`🔤 نوع الكود المخزن: ${typeof storedData.code}`);
+        
+        // التحقق من وقت انتهاء الصلاحية (10 دقائق)
+        const now = new Date();
+        const timestamp = storedData.timestamp ? storedData.timestamp.toDate() : new Date(0);
+        const diffMinutes = (now - timestamp) / (1000 * 60);
+        
+        if (diffMinutes > 10) {
+            console.log(`⏰ الكود منتهي الصلاحية: ${diffMinutes.toFixed(1)} دقيقة`);
+            return res.status(401).send("Error: Code expired");
+        }
+        
+        // المقارنة النهائية
+        if (storedCode === inputCode) {
+            console.log(`✅ تحقق ناجح للرقم: ${formattedPhone}`);
+            
             await admin.firestore().collection('allowed_devices').doc(storedData.deviceId).set({ 
                 phone: formattedPhone, 
                 verifiedAt: new Date() 
             });
+            
+            // اختياري: حذف الكود بعد الاستخدام الناجح
+            await admin.firestore().collection('pending_otps').doc(formattedPhone).delete();
+            
             return res.status(200).send("Verified");
+        } else {
+            console.log(`❌ كود غير صحيح: المدخل ${inputCode} ≠ المخزن ${storedCode}`);
+            return res.status(401).send("Error: Invalid code");
         }
+    } catch (error) {
+        console.error("🔥 خطأ في التحقق:", error);
+        res.status(500).send("Error: Internal server error");
     }
-    res.status(401).send("Error");
 });
 
-// --- 5. تشغيل البوت مع حماية الاتصال (نفسه بدون تغيير) ---
+// --- 5. تشغيل البوت مع حماية الاتصال ---
 async function start() {
+    // استعادة الهوية قبل أي شيء
     await syncSession('restore');
+
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const { version } = await fetchLatestBaileysVersion();
 
@@ -121,7 +153,7 @@ async function start() {
         version,
         auth: state, 
         printQRInTerminal: false,
-        logger: pino({ level: "error" }), 
+        logger: pino({ level: "error" }), // تقليل الزحام في السجلات
         browser: ["Guardian VIP", "Chrome", "1.0.0"],
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0
@@ -145,6 +177,7 @@ async function start() {
         if (connection === 'close') {
             isConnected = false;
             const statusCode = lastDisconnect?.error?.output?.statusCode;
+            // لا تعيد الاتصال إذا تم تسجيل الخروج يدوياً، غير ذلك حاول مجدداً
             if (statusCode !== DisconnectReason.loggedOut) {
                 console.log("🔄 محاولة استعادة الاتصال...");
                 setTimeout(start, 5000);
