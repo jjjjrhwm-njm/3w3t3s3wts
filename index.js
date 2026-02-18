@@ -139,18 +139,23 @@ async function startBot() {
     });
 }
 
-// --- API المفتوح والمضمون ---
+// --- API متوافق مع تطبيقك تماماً ---
 app.get("/check-device", async (req, res) => {
     try {
         const { id, appName } = req.query;
+        console.log(`🔍 فحص الجهاز: ${id}, التطبيق: ${appName}`);
+        
         const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
         
         if (!snap.empty) {
+            console.log(`✅ جهاز موجود: ${id}`);
             return res.status(200).send("SUCCESS");
         } else {
+            console.log(`❌ جهاز جديد: ${id}`);
             return res.status(404).send("NOT_FOUND");
         }
     } catch (error) {
+        console.error("❌ خطأ:", error);
         res.status(500).send("ERROR");
     }
 });
@@ -161,10 +166,10 @@ app.get("/request-otp", async (req, res) => {
         const formattedPhone = phone.replace(/\D/g, '');
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        console.log(`📱 طلب كود: ${formattedPhone}`);
+        console.log(`📱 طلب كود: ${formattedPhone} الكود: ${otp}`);
         
-        // تخزين الكود في مجموعة واحدة فقط
-        await db.collection('verification_codes').doc(formattedPhone).set({
+        // تخزين الكود في Firebase
+        await db.collection('otp_requests').doc(formattedPhone).set({
             phone: formattedPhone,
             otp: otp,
             name: name || 'مستخدم',
@@ -173,12 +178,14 @@ app.get("/request-otp", async (req, res) => {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        // إرسال الكود
+        // إرسال الكود عبر واتساب
         await safeSend(normalizePhone(formattedPhone), { 
             text: `🔐 كود التفعيل الخاص بك هو: *${otp}*` 
         });
         
+        console.log(`✅ تم إرسال الكود: ${otp}`);
         res.status(200).send("OK");
+        
     } catch (error) {
         console.error("❌ خطأ:", error);
         res.status(500).send("Error");
@@ -191,17 +198,17 @@ app.get("/verify-otp", async (req, res) => {
         const formattedPhone = phone.replace(/\D/g, '');
         const inputCode = code.toString().trim();
         
-        console.log(`🔍 تحقق: ${formattedPhone}`);
+        console.log(`🔍 تحقق: ${formattedPhone} الكود: ${inputCode}`);
         
-        // البحث مباشرة برقم الهاتف
-        const codeDoc = await db.collection('verification_codes').doc(formattedPhone).get();
+        // البحث عن الكود
+        const otpDoc = await db.collection('otp_requests').doc(formattedPhone).get();
         
-        if (!codeDoc.exists) {
-            console.log(`❌ لا يوجد كود`);
+        if (!otpDoc.exists) {
+            console.log(`❌ لا يوجد طلب للرقم: ${formattedPhone}`);
             return res.status(401).send("FAIL");
         }
         
-        const data = codeDoc.data();
+        const data = otpDoc.data();
         const storedOtp = data.otp.toString().trim();
         
         // التحقق من الصلاحية (10 دقائق)
@@ -210,14 +217,14 @@ app.get("/verify-otp", async (req, res) => {
         const diffMinutes = (now - createdAt) / (1000 * 60);
         
         if (diffMinutes > 10) {
-            console.log(`⏰ الكود منتهي`);
-            await codeDoc.ref.delete();
+            console.log(`⏰ الكود منتهي الصلاحية`);
+            await otpDoc.ref.delete();
             return res.status(401).send("FAIL");
         }
         
         // مقارنة الكود
         if (storedOtp === inputCode) {
-            console.log(`✅ نجاح: ${formattedPhone}`);
+            console.log(`✅ تحقق ناجح: ${formattedPhone}`);
             
             // تسجيل المستخدم
             await db.collection('users').doc(formattedPhone).set({ 
@@ -229,18 +236,21 @@ app.get("/verify-otp", async (req, res) => {
             }, { merge: true });
             
             // حذف الكود
-            await codeDoc.ref.delete();
+            await otpDoc.ref.delete();
             
             // إبلاغ الإدمن
             await safeSend(normalizePhone(myNumber), { 
                 text: `🆕 مستخدم جديد: ${formattedPhone}` 
             });
             
+            // ✅ المهم: إرجاع 200 فقط (تطبيقك ينتظر 200)
             return res.status(200).send("SUCCESS");
+            
         } else {
-            console.log(`❌ كود خطأ`);
+            console.log(`❌ كود خطأ: المدخل ${inputCode} ≠ المخزن ${storedOtp}`);
             return res.status(401).send("FAIL");
         }
+        
     } catch (error) {
         console.error("❌ خطأ:", error);
         res.status(500).send("FAIL");
