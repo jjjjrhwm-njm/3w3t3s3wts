@@ -187,7 +187,7 @@ async function startBot() {
     const folder = './auth_info_stable';
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     try {
-        // ✅ فقط هذا السطر تم تغييره - من session_otp_stable إلى session_vip_rashed
+        // ✅ تم تغيير مسار الجلسة إلى session_vip_rashed
         const sessionSnap = await db.collection('session').doc('session_vip_rashed').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
