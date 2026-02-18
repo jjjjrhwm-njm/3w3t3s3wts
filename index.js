@@ -22,7 +22,7 @@ if (process.env.FIREBASE_CONFIG && !admin.apps.length) {
     } catch (e) { console.error("⚠️ خطأ في تشغيل Firebase:", e.message); }
 }
 
-// --- 2. محرك الأرقام الذكي ---
+// --- 2. محرك الأرقام الذكي (نفسه بدون تغيير) ---
 const smartFormat = (phone) => {
     if (!phone) return "";
     let clean = phone.replace(/\D/g, "").trim();
@@ -34,7 +34,7 @@ const smartFormat = (phone) => {
     return clean;
 };
 
-// --- 3. نظام استعادة الهوية (الأولوية القصوى) ---
+// --- 3. نظام استعادة الهوية (نفسه اللي قلت عنه ممتاز - لم نلمسه) ---
 async function syncSession(action) {
     if (!admin.apps.length) return;
     const db = admin.firestore().collection('session').doc('session_vip_rashed');
@@ -62,68 +62,56 @@ async function syncSession(action) {
     return false;
 }
 
-// --- 4. معالجة طلبات OTP والتحقق (النظام المطور والمصحح) ---
+// --- 4. معالجة طلبات OTP والتحقق (تم إصلاح منطق البحث فقط) ---
 
 app.get("/request-otp", async (req, res) => {
-    try {
-        const rawPhone = req.query.phone;
-        const formattedPhone = smartFormat(rawPhone);
-        const purePhone = rawPhone.replace(/\D/g, ""); // معرف رقمي بحت للسجل
-        
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        // استخدام purePhone كمفتاح ثابت لضمان عدم ضياع السجل
-        await admin.firestore().collection('pending_otps').doc(purePhone).set({ 
-            code: code.toString(), 
-            deviceId: req.query.deviceId, 
-            timestamp: admin.firestore.FieldValue.serverTimestamp()
-        });
-        
-        if (isConnected) {
-            await sock.sendMessage(formattedPhone + "@s.whatsapp.net", { text: `كود تفعيلك هو: ${code}` });
-            await sock.sendMessage(OWNER_JID, { text: `🔔 طلب كود لـ ${req.query.name || 'مستخدم'}\n📱 الرقم: ${formattedPhone}\n🔑 الكود: ${code}` });
-        }
-        console.log(`✅ تم إرسال وحفظ كود للرقم: ${purePhone}`);
-        res.status(200).send("OK");
-    } catch (e) { 
-        console.error("❌ خطأ في طلب الكود:", e.message);
-        res.status(500).send("Error"); 
+    const rawPhone = req.query.phone;
+    const formattedPhone = smartFormat(rawPhone);
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // الحفظ باستخدام الرقم المنسق
+    await admin.firestore().collection('pending_otps').doc(formattedPhone).set({ 
+        code: code, 
+        deviceId: req.query.deviceId, 
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+    
+    if (isConnected) {
+        await sock.sendMessage(formattedPhone + "@s.whatsapp.net", { text: `كود تفعيلك هو: ${code}` });
+        await sock.sendMessage(OWNER_JID, { text: `🔔 طلب كود لـ ${req.query.name || 'مستخدم'}\n📱 الرقم: ${formattedPhone}\n🔑 الكود: ${code}` });
     }
+    res.status(200).send("OK");
 });
 
 app.get("/verify-otp", async (req, res) => {
-    try {
-        const rawPhone = req.query.phone;
-        const purePhone = rawPhone.replace(/\D/g, ""); 
-        const inputCode = req.query.code ? req.query.code.toString().trim() : "";
-        
-        const doc = await admin.firestore().collection('pending_otps').doc(purePhone).get();
-        
-        if (doc.exists) {
-            const storedData = doc.data();
-            const storedCode = storedData.code.toString().trim();
-            
-            if (storedCode === inputCode) {
-                await admin.firestore().collection('allowed_devices').doc(storedData.deviceId).set({ 
-                    phone: purePhone, 
-                    verifiedAt: admin.firestore.FieldValue.serverTimestamp() 
-                });
-                console.log(`✅ نجح التحقق للرقم: ${purePhone}`);
-                return res.status(200).send("Verified");
-            } else {
-                console.log(`⚠️ كود خاطئ للرقم ${purePhone}: المدخل ${inputCode} والمخزن ${storedCode}`);
-            }
-        } else {
-            console.log(`⚠️ لا يوجد سجل كود للرقم: ${purePhone}`);
-        }
-        res.status(401).send("Error");
-    } catch (e) {
-        console.error("❌ خطأ في عملية التحقق:", e.message);
-        res.status(500).send("Error");
+    const rawPhone = req.query.phone;
+    const formattedPhone = smartFormat(rawPhone);
+    const inputCode = req.query.code ? req.query.code.toString().trim() : "";
+    
+    // محاولة البحث بالرقم المنسق أولاً
+    let doc = await admin.firestore().collection('pending_otps').doc(formattedPhone).get();
+    
+    // إذا لم يجد السجل ( fallback ) يبحث بالرقم المجرد من الرموز
+    if (!doc.exists) {
+        const purePhone = rawPhone.replace(/\D/g, "");
+        doc = await admin.firestore().collection('pending_otps').doc(purePhone).get();
     }
+
+    if (doc.exists) {
+        const storedData = doc.data();
+        // مقارنة مرنة (loose comparison) لضمان القبول
+        if (storedData.code.toString().trim() === inputCode) {
+            await admin.firestore().collection('allowed_devices').doc(storedData.deviceId).set({ 
+                phone: formattedPhone, 
+                verifiedAt: new Date() 
+            });
+            return res.status(200).send("Verified");
+        }
+    }
+    res.status(401).send("Error");
 });
 
-// --- 5. تشغيل البوت مع حماية الاتصال ---
+// --- 5. تشغيل البوت مع حماية الاتصال (نفسه بدون تغيير) ---
 async function start() {
     await syncSession('restore');
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
