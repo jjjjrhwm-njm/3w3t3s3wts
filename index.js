@@ -11,41 +11,33 @@ const path = require("path");
 const app = express();
 const port = process.env.PORT || 10000;
 
-// رقمك الأساسي لاستقبال المعلومات
 const OWNER_JID = (process.env.OWNER_NUMBER || "966554526287") + "@s.whatsapp.net";
-
 let sock, qrCodeImage, isConnected = false;
+let isSessionRestoredLogged = false; // لمنع تكرار السجلات
 
-// --- 1. المحرك الذكي العالمي للأرقام (تصحيح تلقائي فوري) ---
+// --- 1. المحرك الذكي العالمي للأرقام (صارم جداً) ---
 const smartFormat = (phone) => {
     if (!phone) return "";
-    let clean = phone.replace(/\D/g, ""); // تنظيف من أي رموز أو مسافات
-    
-    // إزالة الأصفار الزائدة في البداية (مثل 00 أو 0)
+    let clean = phone.replace(/\D/g, ""); 
     if (clean.startsWith("00")) clean = clean.substring(2);
     if (clean.startsWith("0")) clean = clean.substring(1);
     
-    // محاولة المعالجة الذكية (الأولوية للسعودية SA واليمن YE)
     const regions = ['SA', 'YE', 'EG', 'SY', 'IQ', 'JO', 'AE', 'KW'];
     for (let r of regions) {
         const p = parsePhoneNumberFromString(clean, r);
         if (p && p.isValid()) return p.format('E.164').replace('+', '');
     }
-    
-    // إذا لم يطابق الأنماط العربية، نحاول المعالجة كـ رقم دولي عام
     const globalP = parsePhoneNumberFromString("+" + clean);
     if (globalP && globalP.isValid()) return globalP.format('E.164').replace('+', '');
-
     return clean;
 };
 
-// --- 2. إعداد جوجل فايربيس (الخزانة) ---
+// --- 2. إعداد جوجل فايربيس ---
 if (process.env.FIREBASE_CONFIG) {
     try {
         const cert = JSON.parse(process.env.FIREBASE_CONFIG);
         if (!admin.apps.length) admin.initializeApp({ credential: admin.credential.cert(cert) });
-        console.log("✅ متصل بخزانة جوجل");
-    } catch (e) { console.log("⚠️ خطأ في إعدادات Firebase"); }
+    } catch (e) { console.log("⚠️ Firebase Error"); }
 }
 
 // --- 3. نظام استعادة الهوية (Vault) ---
@@ -59,7 +51,10 @@ async function syncSession(action) {
         if (doc.exists) {
             if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
             fs.writeFileSync(path.join(authDir, 'creds.json'), JSON.stringify(doc.data()));
-            console.log("🔄 تم استعادة هويتك من جوجل");
+            if (!isSessionRestoredLogged) {
+                console.log("✅ تم استعادة هويتك بنجاح - لن يتم تكرار هذا السجل");
+                isSessionRestoredLogged = true;
+            }
         }
     } else {
         const credPath = path.join(authDir, 'creds.json');
@@ -78,27 +73,20 @@ app.get("/check-device", async (req, res) => {
 });
 
 app.get("/request-otp", async (req, res) => {
-    const rawPhone = req.query.phone;
-    const name = req.query.name || "مستخدم";
-    const formattedPhone = smartFormat(rawPhone);
+    const formattedPhone = smartFormat(req.query.phone);
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // الهوية الفريدة للطلب: (الرقم + الكود) لضمان عدم التداخل
-    const requestId = `${formattedPhone}_${code}`;
-    
-    await admin.firestore().collection('pending_otps').doc(requestId).set({ 
-        code, 
-        phone: formattedPhone,
-        name,
+    // الحفظ باستخدام الرقم الموحد كعنوان للوثيقة
+    await admin.firestore().collection('pending_otps').doc(formattedPhone).set({ 
+        code: code.trim(), 
         deviceId: req.query.deviceId, 
         time: new Date() 
     });
     
     if (isConnected) {
-        const targetJid = formattedPhone + "@s.whatsapp.net";
-        await sock.sendMessage(targetJid, { text: `كود تفعيلك هو: ${code}` });
+        await sock.sendMessage(formattedPhone + "@s.whatsapp.net", { text: `كود تفعيلك هو: ${code}` });
         await sock.sendMessage(OWNER_JID, { 
-            text: `🔔 طلب جديد:\n👤 الاسم: ${name}\n📱 الرقم: ${formattedPhone}\n🔑 الكود: ${code}` 
+            text: `🔔 طلب جديد:\n👤 الاسم: ${req.query.name || 'مستخدم'}\n📱 الرقم: ${formattedPhone}\n🔑 الكود: ${code}` 
         });
     }
     res.status(200).send("OK");
@@ -108,24 +96,22 @@ app.get("/verify-otp", async (req, res) => {
     const formattedPhone = smartFormat(req.query.phone);
     const inputCode = req.query.code ? req.query.code.trim() : "";
     
-    // البحث عن الوثيقة التي تطابق (الرقم + الكود) معاً
-    const requestId = `${formattedPhone}_${inputCode}`;
-    const doc = await admin.firestore().collection('pending_otps').doc(requestId).get();
+    const doc = await admin.firestore().collection('pending_otps').doc(formattedPhone).get();
     
+    // مطابقة الكود بالرقم الموحد
     if (doc.exists && doc.data().code === inputCode) {
-        // نجاح: تسجيل الجهاز في القائمة البيضاء
         await admin.firestore().collection('allowed_devices').doc(doc.data().deviceId).set({ 
             phone: formattedPhone, 
-            name: doc.data().name,
             date: new Date() 
         });
         return res.status(200).send("Verified");
     }
     
+    console.log(`❌ فشل التحقق للرقم ${formattedPhone}: الكود المدخل ${inputCode} لا يطابق المخزن.`);
     res.status(401).send("Error");
 });
 
-// --- 5. تشغيل المحرك والنبض ---
+// --- 5. تشغيل المحرك ---
 async function start() {
     await syncSession('restore');
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -139,14 +125,11 @@ async function start() {
         browser: ["Guardian VIP", "Chrome", "114.0.5735.198"]
     });
 
-    sock.ev.on('creds.update', async () => { 
-        await saveCreds(); 
-        await syncSession('save'); 
-    });
+    sock.ev.on('creds.update', async () => { await saveCreds(); await syncSession('save'); });
 
     sock.ev.on('connection.update', (u) => {
         const { connection, qr, lastDisconnect } = u;
-        if (qr) QRCode.toDataURL(u.qr, (err, url) => { qrCodeImage = url; });
+        if (qr) QRCode.toDataURL(qr, (err, url) => { qrCodeImage = url; });
         if (connection === 'open') { 
             isConnected = true; 
             qrCodeImage = "DONE"; 
@@ -158,10 +141,7 @@ async function start() {
         }
     });
     
-    // نبض النظام كل 10 دقائق
-    setInterval(async () => { 
-        if (isConnected) await sock.sendPresenceUpdate('available'); 
-    }, 10 * 60 * 1000);
+    setInterval(async () => { if (isConnected) await sock.sendPresenceUpdate('available'); }, 10 * 60 * 1000);
 }
 
 app.get("/", (req, res) => {
