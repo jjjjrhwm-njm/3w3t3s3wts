@@ -1,18 +1,21 @@
 {
-  "name": "guardian-basic-vault",
+  "name": "creative-star-bot",
   "version": "1.0.0",
-  "description": "خزانة البيانات الأساسية - نسخة نجم الإبداع",
+  "description": "نظام نجم الإبداع للتوثيق والنشر",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.6.0",
-    "firebase-admin": "^12.0.0",
-    "libphonenumber-js": "^1.10.44",
+    "@hapi/boom": "^10.0.1",
+    "firebase-admin": "^11.11.1",
     "express": "^4.18.2",
     "qrcode": "^1.5.3",
-    "pino": "^9.0.0",
-    "dotenv": "^16.3.1"
+    "pino": "^8.16.1",
+    "link-preview-js": "^3.0.4"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
