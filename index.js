@@ -20,7 +20,7 @@ let sock;
 let qrImage = ""; 
 let isStarting = false;
 const userState = new Map(); 
-const myNumber = "966554526287"; // رقم الإدمن
+const myNumber = "966554526287";
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
@@ -33,7 +33,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- 2. النبض الحديدي (كل 10 دقائق) ---
+// --- 2. النبض الحديدي ---
 setInterval(() => {
     const host = process.env.RENDER_EXTERNAL_HOSTNAME;
     if (host) {
@@ -77,9 +77,6 @@ async function restoreIdentity() {
             fs.writeFileSync(credPath, JSON.stringify(sessionDoc.data()));
             console.log("✅ تم استعادة هوية رقم 966554526287 بنجاح");
             return true;
-        } else {
-            console.log("⚠️ لا توجد هوية محفوظة في Firebase");
-            return false;
         }
     } catch (error) {
         console.log("❌ فشل استعادة الهوية:", error.message);
@@ -102,113 +99,18 @@ async function saveIdentity() {
     }
 }
 
-// --- 4. محرك معالجة الأوامر ---
+// --- 4. محرك معالجة الأوامر (مختصر) ---
 async function processCommand(jid, text, sender, isMe) {
-    const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
-    if (isMe && botTokens.some(token => text.includes(token))) return true;
-
     if (sender !== myNumber && !isMe) return false;
-
-    const currentState = userState.get(jid);
-
-    if (currentState) {
-        if (text.toLowerCase() === "خروج") {
-            userState.delete(jid);
-            await safeSend(jid, { text: "❌ تم إلغاء العملية والعودة للوضع الطبيعي." });
-            return true;
-        }
-
-        if (currentState.command === "نشر") {
-            if (currentState.step === "waiting_link") {
-                if (!text.startsWith('http')) {
-                    await safeSend(jid, { text: "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http" });
-                    return true;
-                }
-                currentState.link = text;
-                currentState.step = "waiting_desc";
-                userState.set(jid, currentState);
-                await safeSend(jid, { text: "✅ تم استلام الرابط. الآن أرسل *الوصف*:" });
-                return true;
-            }
-
-            if (currentState.step === "waiting_desc") {
-                currentState.desc = text;
-                currentState.step = "waiting_target";
-                userState.set(jid, currentState);
-                
-                const snap = await db.collection('users').get();
-                let apps = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
-                let menu = "🎯 *اختر الجمهور المستهدف:*\n\n0 - 🌐 إرسال للجميع\n";
-                apps.forEach((n, i) => menu += `${i + 1} - 📱 مستخدمي [${n}]\n`);
-                await safeSend(jid, { text: menu + "\n💡 أرسل رقم الخيار المطلوب." });
-                return true;
-            }
-
-            if (currentState.step === "waiting_target") {
-                const snap = await db.collection('users').get();
-                let appsArr = [...new Set(snap.docs.map(d => d.data().appName || "عام"))];
-                let targets = [];
-
-                if (text === "0") { 
-                    targets = snap.docs; 
-                } else {
-                    const idx = parseInt(text) - 1;
-                    if (isNaN(idx) || !appsArr[idx]) {
-                        await safeSend(jid, { text: "❌ رقم غير صحيح. اختر من القائمة أو أرسل *خروج*:" });
-                        return true;
-                    }
-                    targets = snap.docs.filter(d => (d.data().appName || "عام") === appsArr[idx]);
-                }
-
-                await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length} مستخدم...` });
-                
-                let successCount = 0;
-                for (const d of targets) {
-                    try {
-                        await safeSend(normalizePhone(d.data().phone), { 
-                            text: `📢 *تحديث جديد من نجم الإبداع!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
-                        });
-                        successCount++;
-                    } catch (e) {}
-                }
-                
-                userState.delete(jid);
-                await safeSend(jid, { text: `✅ تم النشر بنجاح لـ ${successCount} من أصل ${targets.length} مستخدم!` });
-                return true;
-            }
-        }
+    
+    if (text === "نجم" || text === "نجم مساعدة") {
+        await safeSend(jid, { text: "🌟 نجم الإبداع يعمل" });
         return true;
     }
-
-    if (!text.startsWith("نجم")) return false;
-
-    switch (text) {
-        case "نجم":
-        case "نجم مساعدة":
-            await safeSend(jid, { text: `🌟 *أوامر نجم الإبداع:*
-
-1️⃣ *نجم نشر* - إعلان تفاعلي (3 خطوات)
-2️⃣ *نجم احصا* - إحصائيات المستخدمين
-3️⃣ *نجم بنج* - فحص سرعة الاتصال
-
-💡 أرسل *خروج* للإلغاء أثناء النشر.` });
-            break;
-            
-        case "نجم نشر":
-            userState.set(jid, { command: "نشر", step: "waiting_link" });
-            await safeSend(jid, { text: "🔗 *خطوة 1/3*\nأرسل *رابط التطبيق* الآن:" });
-            break;
-            
-        case "نجم احصا":
-            const snap = await db.collection('users').get();
-            await safeSend(jid, { text: `📊 إجمالي الموثقين: ${snap.size}` });
-            break;
-            
-        case "نجم بنج":
-            const start = Date.now();
-            await safeSend(jid, { text: "🏓 جاري الفحص..." });
-            await safeSend(jid, { text: `✅ الاستجابة: ${Date.now() - start}ms` });
-            break;
+    if (text === "نجم احصا") {
+        const snap = await db.collection('users').get();
+        await safeSend(jid, { text: `📊 المستخدمين: ${snap.size}` });
+        return true;
     }
     return true;
 }
@@ -220,7 +122,6 @@ async function startBot() {
     const folder = './auth_info_stable';
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
     
-    // استعادة الهوية
     await restoreIdentity();
     
     const { state, saveCreds } = await useMultiFileAuthState(folder);
@@ -243,16 +144,12 @@ async function startBot() {
             const msg = m.messages[0];
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
-            const now = Math.floor(Date.now() / 1000);
-            if (now - msg.messageTimestamp > 15) return;
-
             const jid = msg.key.remoteJid;
             const isMe = msg.key.fromMe;
             const sender = jid.split('@')[0].split(':')[0];
-            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
+            const text = (msg.message.conversation || "").trim();
 
             if (!text) return;
-
             await processCommand(jid, text, sender, isMe);
             
         } catch (e) { console.log("❌ خطأ معالجة:", e.message); }
@@ -264,9 +161,9 @@ async function startBot() {
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل ومستقر بهوية 966554526287");
+            console.log("🚀 النظام متصل");
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز للعمل!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 نجم الإبداع جاهز" });
             }, 2000);
         }
         if (connection === 'close') {
@@ -279,7 +176,7 @@ async function startBot() {
     });
 }
 
-// --- ممرات الـ API (معدلة بالكامل) ---
+// --- ممرات الـ API (مبسطة) ---
 app.get("/check-device", async (req, res) => {
     try {
         const { id, appName } = req.query;
@@ -290,27 +187,28 @@ app.get("/check-device", async (req, res) => {
     }
 });
 
-// ✅ تخزين الكود في Firebase مع deviceId
+// ✅ تخزين الكود مع ربطه بالجهاز
 app.get("/request-otp", async (req, res) => {
     try {
         const { phone, name, app: appName, deviceId } = req.query;
         const formattedPhone = phone.replace(/\D/g, '');
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        console.log(`📱 طلب كود: ${formattedPhone} الكود: ${otp} الجهاز: ${deviceId}`);
+        console.log(`📱 طلب كود: ${formattedPhone} الكود: ${otp}`);
         
-        // تخزين الكود مع ربطه بالجهاز
-        await db.collection('pending_otps').doc(deviceId).set({
+        // تخزين الكود مع ربطه بالجهاز ورقم الهاتف
+        const otpData = {
             phone: formattedPhone,
             otp: otp,
             name: name || 'مستخدم',
             appName: appName || 'default',
             deviceId: deviceId,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
+        };
         
-        // أيضاً تخزين مؤشر للبحث بالرقم
-        await db.collection('phone_codes').doc(formattedPhone).set({
+        // تخزين في مجموعتين للوصول السريع
+        await db.collection('pending_otps').doc(deviceId).set(otpData);
+        await db.collection('pending_phones').doc(formattedPhone).set({
             deviceId: deviceId,
             otp: otp,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -318,7 +216,7 @@ app.get("/request-otp", async (req, res) => {
         
         // إرسال الكود
         await safeSend(normalizePhone(formattedPhone), { 
-            text: `🔐 أهلاً ${name}، كود دخولك لـ [${appName}] هو: *${otp}*` 
+            text: `🔐 أهلاً ${name}، كود تفعيل تطبيق ${appName} هو: *${otp}*` 
         });
         
         res.status(200).send("OK");
@@ -328,68 +226,76 @@ app.get("/request-otp", async (req, res) => {
     }
 });
 
-// ✅ التحقق من الكود بالبحث في كلا المجموعتين
+// ✅ التحقق من الكود - يعيد SUCCESS فقط عند النجاح
 app.get("/verify-otp", async (req, res) => {
     try {
         const { phone, code } = req.query;
         const formattedPhone = phone.replace(/\D/g, '');
         const inputCode = code.toString().trim();
         
-        console.log(`🔍 محاولة تحقق: الرقم ${formattedPhone}، الكود: ${inputCode}`);
+        console.log(`🔍 محاولة تحقق: ${formattedPhone} الكود: ${inputCode}`);
         
-        // البحث في phone_codes أولاً
-        const phoneDoc = await db.collection('phone_codes').doc(formattedPhone).get();
+        // البحث عن الجهاز المرتبط بالرقم
+        const phoneDoc = await db.collection('pending_phones').doc(formattedPhone).get();
         
         if (!phoneDoc.exists) {
-            console.log(`❌ لا يوجد كود للرقم: ${formattedPhone}`);
+            console.log(`❌ لا يوجد طلب للرقم: ${formattedPhone}`);
             return res.status(401).send("FAIL");
         }
         
         const phoneData = phoneDoc.data();
         const deviceId = phoneData.deviceId;
-        const storedOtp = phoneData.otp.toString().trim();
         
-        // التحقق من الصلاحية
-        const createdAt = phoneData.createdAt?.toDate?.() || new Date();
+        // البحث عن تفاصيل الكود
+        const otpDoc = await db.collection('pending_otps').doc(deviceId).get();
+        
+        if (!otpDoc.exists) {
+            console.log(`❌ لا يوجد كود للجهاز: ${deviceId}`);
+            await phoneDoc.ref.delete();
+            return res.status(401).send("FAIL");
+        }
+        
+        const otpData = otpDoc.data();
+        const storedOtp = otpData.otp.toString().trim();
+        
+        // التحقق من الصلاحية (10 دقائق)
+        const createdAt = otpData.createdAt?.toDate?.() || new Date();
         const now = new Date();
         const diffMinutes = (now - createdAt) / (1000 * 60);
         
         if (diffMinutes > 10) {
             console.log(`⏰ الكود منتهي الصلاحية`);
+            await otpDoc.ref.delete();
             await phoneDoc.ref.delete();
-            await db.collection('pending_otps').doc(deviceId).delete();
             return res.status(401).send("FAIL");
         }
         
         // مقارنة الكود
         if (storedOtp === inputCode) {
-            console.log(`✅ تحقق ناجح للرقم: ${formattedPhone}`);
-            
-            // البحث عن البيانات الكاملة
-            const otpDoc = await db.collection('pending_otps').doc(deviceId).get();
-            const fullData = otpDoc.exists ? otpDoc.data() : phoneData;
+            console.log(`✅ تحقق ناجح: ${formattedPhone}`);
             
             // تسجيل المستخدم
             await db.collection('users').doc(formattedPhone).set({ 
-                name: fullData.name || 'مستخدم',
+                name: otpData.name || 'مستخدم',
                 phone: formattedPhone,
-                appName: fullData.appName || 'default',
+                appName: otpData.appName || 'default',
                 deviceId: deviceId,
                 verifiedAt: admin.firestore.FieldValue.serverTimestamp()
             }, { merge: true });
             
-            // تنظيف البيانات المؤقتة
+            // تنظيف
+            await otpDoc.ref.delete();
             await phoneDoc.ref.delete();
-            await db.collection('pending_otps').doc(deviceId).delete();
             
             // إبلاغ الإدمن
             await safeSend(normalizePhone(myNumber), { 
-                text: `🆕 مستخدم جديد: ${fullData.name || 'مستخدم'} (${formattedPhone})` 
+                text: `🆕 مستخدم جديد: ${otpData.name || 'مستخدم'} (${formattedPhone})` 
             });
             
+            // تطبيقك ينتظر SUCCESS
             return res.status(200).send("SUCCESS");
         } else {
-            console.log(`❌ كود غير صحيح: المدخل ${inputCode} ≠ المخزن ${storedOtp}`);
+            console.log(`❌ كود غير صحيح: ${inputCode} ≠ ${storedOtp}`);
             return res.status(401).send("FAIL");
         }
     } catch (error) {
