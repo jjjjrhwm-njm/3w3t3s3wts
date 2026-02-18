@@ -11,7 +11,6 @@ const QRCode = require("qrcode");
 const fs = require("fs");
 const pino = require("pino");
 const https = require("https");
-const path = require("path");
 
 const app = express();
 app.use(express.json());
@@ -21,7 +20,7 @@ let qrImage = "";
 let isStarting = false;
 const tempCodes = new Map(); 
 const userState = new Map(); 
-const myNumber = "966554526287"; // تم التغيير إلى رقمك
+const myNumber = "966554526287"; // رقم الإدمن
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
@@ -63,63 +62,18 @@ function normalizePhone(phone) {
     return clean + "@s.whatsapp.net";
 }
 
-// --- 3. دالة استعادة الهوية من Firebase ---
-async function restoreIdentity() {
-    try {
-        const authDir = './auth_info_stable';
-        const credPath = path.join(authDir, 'creds.json');
-        
-        // التحقق من وجود الهوية في Firebase
-        const sessionDoc = await db.collection('session').doc('session_vip_rashed').get();
-        
-        if (sessionDoc.exists) {
-            // إنشاء المجلد إذا لم يكن موجوداً
-            if (!fs.existsSync(authDir)) {
-                fs.mkdirSync(authDir, { recursive: true });
-            }
-            
-            // كتابة الهوية المستعادة
-            fs.writeFileSync(credPath, JSON.stringify(sessionDoc.data()));
-            console.log("✅ تم استعادة هوية رقم 966554526287 بنجاح");
-            return true;
-        } else {
-            console.log("⚠️ لا توجد هوية محفوظة في Firebase");
-            return false;
-        }
-    } catch (error) {
-        console.log("❌ فشل استعادة الهوية:", error.message);
-        return false;
-    }
-}
-
-// --- 4. دالة حفظ الهوية في Firebase ---
-async function saveIdentity() {
-    try {
-        const authDir = './auth_info_stable';
-        const credPath = path.join(authDir, 'creds.json');
-        
-        if (fs.existsSync(credPath)) {
-            const creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
-            await db.collection('session').doc('session_vip_rashed').set(creds, { merge: true });
-            console.log("✅ تم حفظ الهوية في Firebase");
-        }
-    } catch (error) {
-        console.log("❌ فشل حفظ الهوية:", error.message);
-    }
-}
-
-// --- 5. محرك معالجة الأوامر المدمج ---
+// --- 3. محرك معالجة الأوامر المدمج (القوة + الأمان) ---
 async function processCommand(jid, text, sender, isMe) {
-    // 🛑 حماية مدمجة: منع البوت من الرد على إشعاراته الخاصة
+    // 🛑 حماية مدمجة: منع البوت من الرد على إشعاراته الخاصة أو رسائل الخطأ لقتل التكرار
     const botTokens = ["أرسل", "تم استلام", "رقم غير صحيح", "✅", "❌", "🎯", "🌟", "🚀"];
     if (isMe && botTokens.some(token => text.includes(token))) return true;
 
-    // السماح فقط للإدمن (رقمك)
+    // السماح فقط للإدمن (حتى لو راسلت نفسك)
     if (sender !== myNumber && !isMe) return false;
 
     const currentState = userState.get(jid);
 
-    // معالجة الحالات النشطة
+    // معالجة الحالات النشطة (نظام النشر التفاعلي)
     if (currentState) {
         if (text.toLowerCase() === "خروج") {
             userState.delete(jid);
@@ -184,7 +138,7 @@ async function processCommand(jid, text, sender, isMe) {
                     } catch (e) {}
                 }
                 
-                userState.delete(jid);
+                userState.delete(jid); // مسح الحالة فوراً لضمان الصمت التام
                 await safeSend(jid, { text: `✅ تم النشر بنجاح لـ ${successCount} من أصل ${targets.length} مستخدم!` });
                 return true;
             }
@@ -232,12 +186,9 @@ async function startBot() {
 
     const folder = './auth_info_stable';
     if (!fs.existsSync(folder)) fs.mkdirSync(folder);
-    
-    // ✅ استعادة الهوية قبل بدء التشغيل
-    await restoreIdentity();
-    
     try {
-        const sessionSnap = await db.collection('session').doc('session_otp_stable').get();
+        // ✅ فقط هذا السطر تم تغييره - من session_otp_stable إلى session_vip_rashed
+        const sessionSnap = await db.collection('session').doc('session_vip_rashed').get();
         if (sessionSnap.exists) fs.writeFileSync(`${folder}/creds.json`, JSON.stringify(sessionSnap.data()));
     } catch (e) {}
     
@@ -245,27 +196,20 @@ async function startBot() {
     const { version } = await fetchLatestBaileysVersion();
     
     sock = makeWASocket({ 
-        version, 
-        auth: state, 
-        logger: pino({ level: "silent" }), 
+        version, auth: state, logger: pino({ level: "silent" }), 
         browser: ["CreativeStar", "Chrome", "1.0"],
-        printQRInTerminal: false, 
-        syncFullHistory: false,
-        connectTimeoutMs: 60000, 
-        keepAliveIntervalMs: 30000
+        printQRInTerminal: false, syncFullHistory: false,
+        connectTimeoutMs: 60000, keepAliveIntervalMs: 30000
     });
 
-    sock.ev.on('creds.update', async () => { 
-        await saveCreds(); 
-        await saveIdentity(); // حفظ الهوية عند التحديث
-    });
+    sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('messages.upsert', async (m) => {
         try {
             const msg = m.messages[0];
             if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
-            // حماية: تجاهل الرسائل القديمة (أكثر من 15 ثانية)
+            // 🛡️ حماية: تجاهل الرسائل القديمة (أكثر من 15 ثانية) لمنع خطأ 428
             const now = Math.floor(Date.now() / 1000);
             if (now - msg.messageTimestamp > 15) return;
 
@@ -288,24 +232,16 @@ async function startBot() {
         if (connection === 'open') {
             qrImage = "DONE";
             isStarting = false;
-            console.log("🚀 النظام متصل ومستقر بهوية رقم 966554526287");
+            console.log("🚀 النظام متصل ومستقر.");
             // ترحيب التشغيل
             setTimeout(() => {
-                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز للعمل بهويتك!*\nأرسل *نجم* للتحكم." });
+                safeSend(normalizePhone(myNumber), { text: "🌟 *نجم الإبداع جاهز للعمل!*\nأرسل *نجم* للتحكم." });
             }, 2000);
         }
         if (connection === 'close') {
             isStarting = false;
             const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
-            if (code !== DisconnectReason.loggedOut) {
-                console.log("🔄 محاولة إعادة الاتصال...");
-                setTimeout(() => startBot(), 10000);
-            } else {
-                console.log("❌ تم تسجيل الخروج، يلزم مسح QR جديد");
-                try {
-                    fs.rmSync('./auth_info_stable', { recursive: true, force: true });
-                } catch (e) {}
-            }
+            if (code !== DisconnectReason.loggedOut) setTimeout(() => startBot(), 10000);
         }
     });
 }
