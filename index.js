@@ -11,22 +11,31 @@ const path = require("path");
 const app = express();
 const port = process.env.PORT || 10000;
 
-// الهوية الأصلية: الرقم الذي ستصل عليه التنبيهات
+// رقمك الأساسي لاستقبال المعلومات
 const OWNER_JID = (process.env.OWNER_NUMBER || "966554526287") + "@s.whatsapp.net";
 
 let sock, qrCodeImage, isConnected = false;
 
-// --- 1. المحرك الذكي لتنسيق الأرقام (السعودية، اليمن، مصر...) ---
+// --- 1. المحرك الذكي العالمي للأرقام (تصحيح تلقائي فوري) ---
 const smartFormat = (phone) => {
-    let clean = phone.replace(/\D/g, "");
+    if (!phone) return "";
+    let clean = phone.replace(/\D/g, ""); // تنظيف من أي رموز أو مسافات
+    
+    // إزالة الأصفار الزائدة في البداية (مثل 00 أو 0)
+    if (clean.startsWith("00")) clean = clean.substring(2);
     if (clean.startsWith("0")) clean = clean.substring(1);
     
-    // محاولة التمييز التلقائي للدول العربية
-    const regions = ['SA', 'YE', 'EG', 'SY', 'IQ', 'JO', 'AE'];
+    // محاولة المعالجة الذكية (الأولوية للسعودية SA واليمن YE)
+    const regions = ['SA', 'YE', 'EG', 'SY', 'IQ', 'JO', 'AE', 'KW'];
     for (let r of regions) {
         const p = parsePhoneNumberFromString(clean, r);
         if (p && p.isValid()) return p.format('E.164').replace('+', '');
     }
+    
+    // إذا لم يطابق الأنماط العربية، نحاول المعالجة كـ رقم دولي عام
+    const globalP = parsePhoneNumberFromString("+" + clean);
+    if (globalP && globalP.isValid()) return globalP.format('E.164').replace('+', '');
+
     return clean;
 };
 
@@ -39,8 +48,7 @@ if (process.env.FIREBASE_CONFIG) {
     } catch (e) { console.log("⚠️ خطأ في إعدادات Firebase"); }
 }
 
-// --- 3. نظام استعادة الهوية (عشان ما يطلب QR) ---
-// تم تعديل المجلد إلى auth_info ليطابق الهوية القديمة تماماً
+// --- 3. نظام استعادة الهوية (Vault) ---
 async function syncSession(action) {
     if (!admin.apps.length) return;
     const db = admin.firestore().collection('session').doc('session_vip_rashed');
@@ -51,7 +59,7 @@ async function syncSession(action) {
         if (doc.exists) {
             if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
             fs.writeFileSync(path.join(authDir, 'creds.json'), JSON.stringify(doc.data()));
-            console.log("🔄 تم سحب هويتك القديمة بنجاح - الدخول تلقائي");
+            console.log("🔄 تم استعادة هويتك من جوجل");
         }
     } else {
         const credPath = path.join(authDir, 'creds.json');
@@ -63,40 +71,57 @@ async function syncSession(action) {
 }
 
 // --- 4. مسارات الحارس (API) ---
+
 app.get("/check-device", async (req, res) => {
     const doc = await admin.firestore().collection('allowed_devices').doc(req.query.id || 'none').get();
     res.status(doc.exists ? 200 : 403).send(doc.exists ? "OK" : "NO");
 });
 
 app.get("/request-otp", async (req, res) => {
-    const phone = smartFormat(req.query.phone);
+    const rawPhone = req.query.phone;
+    const name = req.query.name || "مستخدم";
+    const formattedPhone = smartFormat(rawPhone);
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // تخزين الكود في جوجل للتحقق لاحقاً
-    await admin.firestore().collection('pending_otps').doc(phone).set({ 
+    // الهوية الفريدة للطلب: (الرقم + الكود) لضمان عدم التداخل
+    const requestId = `${formattedPhone}_${code}`;
+    
+    await admin.firestore().collection('pending_otps').doc(requestId).set({ 
         code, 
+        phone: formattedPhone,
+        name,
         deviceId: req.query.deviceId, 
         time: new Date() 
     });
     
     if (isConnected) {
-        // إرسال الكود للمستخدم
-        await sock.sendMessage(phone + "@s.whatsapp.net", { text: `كود تفعيلك هو: ${code}` });
-        // إرسال تنبيه لرقمك الأساسي
+        const targetJid = formattedPhone + "@s.whatsapp.net";
+        await sock.sendMessage(targetJid, { text: `كود تفعيلك هو: ${code}` });
         await sock.sendMessage(OWNER_JID, { 
-            text: `🔔 طلب جديد:\n👤 الاسم: ${req.query.name || 'مستخدم'}\n📱 الرقم: ${phone}\n🔑 الكود: ${code}` 
+            text: `🔔 طلب جديد:\n👤 الاسم: ${name}\n📱 الرقم: ${formattedPhone}\n🔑 الكود: ${code}` 
         });
     }
     res.status(200).send("OK");
 });
 
 app.get("/verify-otp", async (req, res) => {
-    const phone = smartFormat(req.query.phone);
-    const doc = await admin.firestore().collection('pending_otps').doc(phone).get();
-    if (doc.exists && doc.data().code === req.query.code) {
-        await admin.firestore().collection('allowed_devices').doc(doc.data().deviceId).set({ phone, date: new Date() });
+    const formattedPhone = smartFormat(req.query.phone);
+    const inputCode = req.query.code ? req.query.code.trim() : "";
+    
+    // البحث عن الوثيقة التي تطابق (الرقم + الكود) معاً
+    const requestId = `${formattedPhone}_${inputCode}`;
+    const doc = await admin.firestore().collection('pending_otps').doc(requestId).get();
+    
+    if (doc.exists && doc.data().code === inputCode) {
+        // نجاح: تسجيل الجهاز في القائمة البيضاء
+        await admin.firestore().collection('allowed_devices').doc(doc.data().deviceId).set({ 
+            phone: formattedPhone, 
+            name: doc.data().name,
+            date: new Date() 
+        });
         return res.status(200).send("Verified");
     }
+    
     res.status(401).send("Error");
 });
 
@@ -111,8 +136,7 @@ async function start() {
         auth: state, 
         printQRInTerminal: false,
         logger: pino({ level: "silent" }),
-        // محاكاة نفس المتصفح القديم لضمان قبول الهوية
-        browser: ["Mac OS", "Chrome", "114.0.5735.198"]
+        browser: ["Guardian VIP", "Chrome", "114.0.5735.198"]
     });
 
     sock.ev.on('creds.update', async () => { 
@@ -122,11 +146,11 @@ async function start() {
 
     sock.ev.on('connection.update', (u) => {
         const { connection, qr, lastDisconnect } = u;
-        if (qr) QRCode.toDataURL(qr, (err, url) => { qrCodeImage = url; });
+        if (qr) QRCode.toDataURL(u.qr, (err, url) => { qrCodeImage = url; });
         if (connection === 'open') { 
             isConnected = true; 
             qrCodeImage = "DONE"; 
-            console.log("🛡️ الحارس متصل بنفس الهوية القديمة!"); 
+            console.log("🛡️ الحارس متصل وبصمت تام"); 
         }
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -134,7 +158,7 @@ async function start() {
         }
     });
     
-    // نبض كل 10 دقائق لمنع تعليق الجلسة
+    // نبض النظام كل 10 دقائق
     setInterval(async () => { 
         if (isConnected) await sock.sendPresenceUpdate('available'); 
     }, 10 * 60 * 1000);
