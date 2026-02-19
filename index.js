@@ -164,7 +164,52 @@ async function saveIdentity() {
     }
 }
 
-// --- 4. دوال النشر عبر الواتساب ---
+// --- 4. تعريف دالة startBot قبل استخدامها ---
+async function startBot() {
+    if (isStarting) return;
+    isStarting = true;
+
+    const folder = './auth_info_stable';
+    if (!fs.existsSync(folder)) fs.mkdirSync(folder);
+    
+    await restoreIdentity();
+    
+    const { state, saveCreds } = await useMultiFileAuthState(folder);
+    const { version } = await fetchLatestBaileysVersion();
+    
+    sock = makeWASocket({ 
+        version, 
+        auth: state, 
+        logger: pino({ level: "silent" }), 
+        browser: ["CreativeStar", "Chrome", "1.0"],
+        printQRInTerminal: false, 
+        syncFullHistory: false
+    });
+
+    sock.ev.on('creds.update', async () => { 
+        await saveCreds(); 
+        await saveIdentity(); 
+    });
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, qr, lastDisconnect } = update;
+        if (qr) qrImage = await QRCode.toDataURL(qr);
+        if (connection === 'open') {
+            qrImage = "DONE";
+            isStarting = false;
+            console.log("🚀 البوت متصل");
+        }
+        if (connection === 'close') {
+            isStarting = false;
+            const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
+            if (code !== DisconnectReason.loggedOut) {
+                setTimeout(() => startBot(), 10000);
+            }
+        }
+    });
+}
+
+// --- 5. دوال النشر عبر الواتساب ---
 async function publishToWhatsApp(appName, link, description, chatId) {
     try {
         const usersSnapshot = await db.collection('users').get();
@@ -202,7 +247,7 @@ async function publishToWhatsApp(appName, link, description, chatId) {
     }
 }
 
-// --- 5. إعداد Webhook تيليجرام ---
+// --- 6. إعداد Webhook تيليجرام ---
 async function setupTelegramWebhook() {
     if (!TELEGRAM_BOT_TOKEN) return;
     
@@ -220,7 +265,7 @@ async function setupTelegramWebhook() {
 }
 
 // ============================================
-// API للواتساب (بدون تغيير)
+// API للواتساب
 // ============================================
 
 app.get("/check-device", async (req, res) => {
