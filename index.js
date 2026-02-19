@@ -21,6 +21,9 @@ let sock;
 let qrImage = ""; 
 let isStarting = false;
 
+// رقم المالك (سيتم إرسال الإشعارات إليه)
+const OWNER_NUMBER = process.env.OWNER_NUMBER || "966554526287";
+
 // --- تخزين مؤقت في الذاكرة (مفتاح: الكود نفسه) ---
 const pendingCodes = new Map(); // مفتاح: الكود, قيمة: كل البيانات
 
@@ -279,7 +282,7 @@ app.get("/request-otp", async (req, res) => {
     }
 });
 
-// التحقق من الكود - الأهم: يبحث بالكود فقط!
+// التحقق من الكود - مع إرسال إشعار للمالك
 app.get("/verify-otp", async (req, res) => {
     try {
         const { phone, code } = req.query;
@@ -353,6 +356,48 @@ app.get("/verify-otp", async (req, res) => {
         
         console.log(`✅ تم تسجيل المستخدم: ${userKey}`);
         
+        // ========== إرسال إشعار للمالك بالمستخدم الجديد ==========
+        try {
+            const ownerJid = getJidFromPhone(OWNER_NUMBER);
+            
+            // الحصول على التاريخ والوقت بالتنسيق العربي
+            const now = new Date();
+            const dateStr = now.toLocaleDateString('ar-EG', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            });
+            const timeStr = now.toLocaleTimeString('ar-EG', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            
+            // تحديد رمز الدولة بالعربية
+            const countryNames = {
+                '966': '🇸🇦 السعودية',
+                '967': '🇾🇪 اليمن',
+                '974': '🇶🇦 قطر',
+                'unknown': '🌍 أخرى'
+            };
+            const countryDisplay = countryNames[codeData.formattedPhone?.countryCode] || countryNames.unknown;
+            
+            const message = `🆕 *مستخدم جديد اشترك!*\n\n` +
+                            `👤 *الاسم:* ${codeData.name}\n` +
+                            `📱 *رقم الهاتف:* ${finalPhone}\n` +
+                            `🌍 *الدولة:* ${countryDisplay}\n` +
+                            `📲 *التطبيق:* ${codeData.appName}\n` +
+                            `🆔 *معرف الجهاز:* ${codeData.deviceId}\n` +
+                            `📅 *التاريخ:* ${dateStr}\n` +
+                            `⏰ *الوقت:* ${timeStr}`;
+            
+            await safeSend(ownerJid, { text: message });
+            console.log(`📨 تم إرسال إشعار للمالك بمستخدم جديد: ${codeData.name}`);
+        } catch (notifyError) {
+            console.log("⚠️ فشل إرسال إشعار للمالك:", notifyError.message);
+        }
+        // ====================================================
+        
         // تنظيف الكود
         pendingCodes.delete(code);
         await db.collection('pending_codes').doc(code).delete();
@@ -380,6 +425,7 @@ app.listen(process.env.PORT || 10000, () => {
     console.log("=".repeat(50));
     console.log(`🚀 السيرفر يعمل على المنفذ ${process.env.PORT || 10000}`);
     console.log(`🌐 الرابط: https://threew3t3s3wts.onrender.com`);
+    console.log(`📱 رقم المالك: ${OWNER_NUMBER}`);
     console.log("=".repeat(50));
     startBot();
 });
