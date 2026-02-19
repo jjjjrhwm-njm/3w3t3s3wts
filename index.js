@@ -77,10 +77,57 @@ async function sendTelegram(chatId, text) {
     } catch (e) { console.log("⚠️ فشل إرسال تيليجرام"); }
 }
 
-// دالة عالمية لتنسيق الأرقام
+// دالة عالمية لتنسيق الأرقام - تدعم جميع الدول العربية والإسلامية
 function formatPhoneNumber(phone) {
     let clean = phone.replace(/\D/g, '');
     
+    // إزالة الصفر البادئ أو 00
+    if (clean.startsWith('00')) clean = clean.substring(2);
+    if (clean.startsWith('0')) clean = clean.substring(1);
+    
+    // قائمة بجميع الدول العربية والإسلامية مع أطوال أرقامها وأنماطها
+    const countryPatterns = {
+        // دول مجلس التعاون الخليجي
+        '966': { length: 9, startsWith: ['5'], name: '🇸🇦 السعودية' },
+        '974': { length: 8, startsWith: ['3','4','5','6','7'], name: '🇶🇦 قطر' },
+        '973': { length: 8, startsWith: ['3'], name: '🇧🇭 البحرين' },
+        '968': { length: 8, startsWith: ['2','9'], name: '🇴🇲 عمان' },
+        '965': { length: 8, startsWith: ['5','6','9'], name: '🇰🇼 الكويت' },
+        '971': { length: 9, startsWith: ['5'], name: '🇦🇪 الإمارات' },
+        
+        // دول شرق آسيا وإفريقيا
+        '967': { length: 9, startsWith: ['7'], name: '🇾🇪 اليمن' },
+        '20': { length: 10, startsWith: ['1','2'], name: '🇪🇬 مصر' },
+        '962': { length: 9, startsWith: ['7'], name: '🇯🇴 الأردن' },
+        '964': { length: 10, startsWith: ['7'], name: '🇮🇶 العراق' },
+        '963': { length: 9, startsWith: ['9'], name: '🇸🇾 سوريا' },
+        '961': { length: 8, startsWith: ['3','7'], name: '🇱🇧 لبنان' },
+        
+        // شمال إفريقيا
+        '213': { length: 9, startsWith: ['5','6','7'], name: '🇩🇿 الجزائر' },
+        '212': { length: 9, startsWith: ['6','7'], name: '🇲🇦 المغرب' },
+        '216': { length: 8, startsWith: ['2','5','9'], name: '🇹🇳 تونس' },
+        '218': { length: 9, startsWith: ['9'], name: '🇱🇾 ليبيا' },
+        '222': { length: 8, startsWith: ['2'], name: '🇲🇷 موريتانيا' },
+        '249': { length: 9, startsWith: ['9'], name: '🇸🇩 السودان' },
+        
+        // دول إسلامية أخرى
+        '92': { length: 10, startsWith: ['3'], name: '🇵🇰 باكستان' },
+        '93': { length: 9, startsWith: ['7'], name: '🇦🇫 أفغانستان' },
+        '98': { length: 10, startsWith: ['9'], name: '🇮🇷 إيران' },
+        '90': { length: 10, startsWith: ['5'], name: '🇹🇷 تركيا' },
+        '91': { length: 10, startsWith: ['6','7','8','9'], name: '🇮🇳 الهند' },
+        '880': { length: 10, startsWith: ['1'], name: '🇧🇩 بنجلاديش' },
+        '60': { length: 9, startsWith: ['1'], name: '🇲🇾 ماليزيا' },
+        '62': { length: 10, startsWith: ['8'], name: '🇮🇩 إندونيسيا' },
+        '63': { length: 10, startsWith: ['9'], name: '🇵🇭 الفلبين' },
+        '94': { length: 9, startsWith: ['7'], name: '🇱🇰 سريلانكا' },
+        '95': { length: 8, startsWith: ['9'], name: '🇲🇲 ميانمار' },
+        '673': { length: 7, startsWith: ['2'], name: '🇧🇳 بروناي' },
+        '670': { length: 8, startsWith: ['7'], name: '🇹🇱 تيمور الشرقية' }
+    };
+    
+    // أولاً: محاولة التحقق باستخدام مكتبة libphonenumber-js (لأي رقم في العالم)
     try {
         const phoneNumber = parsePhoneNumberFromString('+' + clean);
         if (phoneNumber && phoneNumber.isValid()) {
@@ -88,40 +135,90 @@ function formatPhoneNumber(phone) {
                 nationalNumber: phoneNumber.nationalNumber,
                 countryCode: phoneNumber.countryCallingCode,
                 fullNumber: phoneNumber.number,
-                isValid: true
+                isValid: true,
+                countryName: getCountryName(phoneNumber.countryCallingCode)
             };
         }
     } catch (e) {}
     
-    if (clean.startsWith('00')) clean = clean.substring(2);
-    if (clean.startsWith('0')) clean = clean.substring(1);
-    
-    let countryCode = '966';
-    let nationalNumber = clean;
-    
-    if (clean.length === 12 && clean.startsWith('966')) {
-        nationalNumber = clean.substring(3);
-        countryCode = '966';
-    } else if (clean.length === 12 && clean.startsWith('967')) {
-        nationalNumber = clean.substring(3);
-        countryCode = '967';
-    } else if (clean.length === 11 && clean.startsWith('974')) {
-        nationalNumber = clean.substring(3);
-        countryCode = '974';
-    } else if (clean.length === 9 && clean.startsWith('5')) {
-        countryCode = '966';
-    } else if (clean.length === 9 && clean.startsWith('7')) {
-        countryCode = '967';
-    } else if (clean.length === 8 && /^[34567]/.test(clean)) {
-        countryCode = '974';
+    // ثانياً: إذا كان الرقم يحوي مفتاح دولة واضح (مثال: 966512345678)
+    for (const [code, pattern] of Object.entries(countryPatterns)) {
+        const codeLength = code.length;
+        if (clean.length === codeLength + pattern.length && clean.startsWith(code)) {
+            const nationalNumber = clean.substring(codeLength);
+            return {
+                nationalNumber: nationalNumber,
+                countryCode: code,
+                fullNumber: '+' + code + nationalNumber,
+                isValid: true,
+                countryName: pattern.name
+            };
+        }
     }
     
+    // ثالثاً: إذا كان الرقم بدون مفتاح دولة، نحاول تحديد الدولة بناءً على الطول وبداية الرقم
+    for (const [code, pattern] of Object.entries(countryPatterns)) {
+        if (clean.length === pattern.length) {
+            for (const start of pattern.startsWith) {
+                if (clean.startsWith(start)) {
+                    return {
+                        nationalNumber: clean,
+                        countryCode: code,
+                        fullNumber: '+' + code + clean,
+                        isValid: true,
+                        countryName: pattern.name
+                    };
+                }
+            }
+        }
+    }
+    
+    // رابعاً: إذا لم نتمكن من التحديد، نستخدم مفتاح افتراضي (السعودية) مع وضع علامة غير موثوق
     return {
-        nationalNumber: nationalNumber,
-        countryCode: countryCode,
-        fullNumber: '+' + countryCode + nationalNumber,
-        isValid: true
+        nationalNumber: clean,
+        countryCode: '966',
+        fullNumber: '+' + '966' + clean,
+        isValid: false,
+        countryName: '🌍 غير معروف'
     };
+}
+
+// دالة مساعدة للحصول على اسم الدولة
+function getCountryName(code) {
+    const names = {
+        '966': '🇸🇦 السعودية',
+        '974': '🇶🇦 قطر',
+        '973': '🇧🇭 البحرين',
+        '968': '🇴🇲 عمان',
+        '965': '🇰🇼 الكويت',
+        '971': '🇦🇪 الإمارات',
+        '967': '🇾🇪 اليمن',
+        '20': '🇪🇬 مصر',
+        '962': '🇯🇴 الأردن',
+        '964': '🇮🇶 العراق',
+        '963': '🇸🇾 سوريا',
+        '961': '🇱🇧 لبنان',
+        '213': '🇩🇿 الجزائر',
+        '212': '🇲🇦 المغرب',
+        '216': '🇹🇳 تونس',
+        '218': '🇱🇾 ليبيا',
+        '222': '🇲🇷 موريتانيا',
+        '249': '🇸🇩 السودان',
+        '92': '🇵🇰 باكستان',
+        '93': '🇦🇫 أفغانستان',
+        '98': '🇮🇷 إيران',
+        '90': '🇹🇷 تركيا',
+        '91': '🇮🇳 الهند',
+        '880': '🇧🇩 بنجلاديش',
+        '60': '🇲🇾 ماليزيا',
+        '62': '🇮🇩 إندونيسيا',
+        '63': '🇵🇭 الفلبين',
+        '94': '🇱🇰 سريلانكا',
+        '95': '🇲🇲 ميانمار',
+        '673': '🇧🇳 بروناي',
+        '670': '🇹🇱 تيمور الشرقية'
+    };
+    return names[code] || '🌍 أخرى';
 }
 
 function getJidFromPhone(phone) {
@@ -268,10 +365,11 @@ async function setupTelegramWebhook() {
 // API للواتساب
 // ============================================
 
+// [تم التعديل] إضافة التحقق من الإصدار
 app.get("/check-device", async (req, res) => {
     try {
-        const { id, appName } = req.query;
-        console.log(`🔍 فحص الجهاز: ${id} للتطبيق: ${appName}`);
+        const { id, appName, version } = req.query;
+        console.log(`🔍 فحص الجهاز: ${id} للتطبيق: ${appName} الإصدار: ${version || 'غير محدد'}`);
         
         const snap = await db.collection('users')
             .where("deviceId", "==", id)
@@ -279,6 +377,15 @@ app.get("/check-device", async (req, res) => {
             .get();
         
         if (!snap.empty) {
+            // التحقق من تطابق الإصدار
+            const userData = snap.docs[0].data();
+            const savedVersion = userData.appVersion || '1.0';
+            
+            if (version && savedVersion !== version) {
+                console.log(`📱 إصدار مختلف: المتوقع ${savedVersion}، المستلم ${version}`);
+                return res.status(409).send("VERSION_MISMATCH");
+            }
+            
             return res.status(200).send("SUCCESS");
         } else {
             return res.status(404).send("NOT_FOUND");
@@ -290,7 +397,7 @@ app.get("/check-device", async (req, res) => {
 
 app.get("/request-otp", async (req, res) => {
     try {
-        const { phone, name, app: appName, deviceId } = req.query;
+        const { phone, name, app: appName, deviceId, version } = req.query;
         
         console.log("=".repeat(50));
         console.log("📱 طلب كود جديد");
@@ -307,6 +414,7 @@ app.get("/request-otp", async (req, res) => {
             name: name || 'مستخدم',
             appName: appName,
             deviceId: deviceId,
+            appVersion: version || '1.0',
             originalPhone: phone,
             formattedPhone: formatted,
             timestamp: Date.now()
@@ -319,6 +427,7 @@ app.get("/request-otp", async (req, res) => {
             name: name || 'مستخدم',
             appName: appName,
             deviceId: deviceId,
+            appVersion: version || '1.0',
             originalPhone: phone,
             countryCode: formatted.countryCode,
             nationalNumber: formatted.nationalNumber,
@@ -326,7 +435,7 @@ app.get("/request-otp", async (req, res) => {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        console.log(`📦 تم تخزين الكود ${otp} للجهاز ${deviceId}`);
+        console.log(`📦 تم تخزين الكود ${otp} للجهاز ${deviceId} (الإصدار: ${version || '1.0'})`);
         
         const jid = getJidFromPhone(phone);
         await safeSend(jid, { 
@@ -389,35 +498,33 @@ app.get("/verify-otp", async (req, res) => {
         
         const userKey = finalPhone + "_" + codeData.appName;
         
+        // [تم التعديل] حفظ رقم الإصدار مع المستخدم
         await db.collection('users').doc(userKey).set({ 
             name: codeData.name,
             phone: finalPhone,
             appName: codeData.appName,
             deviceId: codeData.deviceId,
+            appVersion: codeData.appVersion || '1.0',
             verifiedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         
-        console.log(`✅ تم تسجيل المستخدم: ${userKey}`);
+        console.log(`✅ تم تسجيل المستخدم: ${userKey} (الإصدار: ${codeData.appVersion || '1.0'})`);
         
-        // إرسال إشعار للمالك عبر الواتساب
+        // إرسال إشعار للمالك عبر الواتساب مع اسم الدولة
         try {
             const ownerJid = getJidFromPhone(OWNER_NUMBER);
             const now = new Date();
             const dateStr = now.toLocaleDateString('ar-EG');
             const timeStr = now.toLocaleTimeString('ar-EG');
             
-            const countryNames = {
-                '966': '🇸🇦 السعودية',
-                '967': '🇾🇪 اليمن',
-                '974': '🇶🇦 قطر'
-            };
-            const countryDisplay = countryNames[codeData.formattedPhone?.countryCode] || '🌍 أخرى';
+            const countryDisplay = codeData.formattedPhone?.countryName || getCountryName(codeData.formattedPhone?.countryCode) || '🌍 أخرى';
             
             const message = `🆕 *مستخدم جديد اشترك!*\n\n` +
                             `👤 *الاسم:* ${codeData.name}\n` +
                             `📱 *رقم الهاتف:* ${finalPhone}\n` +
                             `🌍 *الدولة:* ${countryDisplay}\n` +
                             `📲 *التطبيق:* ${codeData.appName}\n` +
+                            `📱 *الإصدار:* ${codeData.appVersion || '1.0'}\n` +
                             `📅 *التاريخ:* ${dateStr} ${timeStr}`;
             
             await safeSend(ownerJid, { text: message });
@@ -538,6 +645,7 @@ app.post("/telegram-webhook", async (req, res) => {
             const appStats = {};
             usersSnap.docs.forEach(doc => {
                 const appName = doc.data().appName || 'غير معروف';
+                const appVersion = doc.data().appVersion || '1.0';
                 appStats[appName] = (appStats[appName] || 0) + 1;
             });
             
