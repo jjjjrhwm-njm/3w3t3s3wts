@@ -24,8 +24,14 @@ let isStarting = false;
 // رقم المالك (سيتم إرسال الإشعارات إليه)
 const OWNER_NUMBER = process.env.OWNER_NUMBER || "966554526287";
 
-// --- تخزين مؤقت في الذاكرة (مفتاح: الكود نفسه) ---
+// متغيرات تيليجرام
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_ADMIN_ID = process.env.TELEGRAM_ADMIN_ID;
+const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+
+// --- تخزين مؤقت في الذاكرة ---
 const pendingCodes = new Map(); // مفتاح: الكود, قيمة: كل البيانات
+const telegramStates = new Map(); // لتخزين حالة المستخدم في تيليجرام
 
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
@@ -47,7 +53,7 @@ setInterval(() => {
     }
 }, 10 * 60 * 1000);
 
-// دالة الإرسال الآمن
+// دالة الإرسال الآمن للواتساب
 async function safeSend(jid, content) {
     try {
         if (sock && sock.user) {
@@ -56,46 +62,57 @@ async function safeSend(jid, content) {
     } catch (e) { console.log("⚠️ فشل الإرسال"); }
 }
 
-// دالة عالمية لتنسيق الأرقام (تتعامل مع كل الصيغ)
+// دالة إرسال رسالة تيليجرام
+async function sendTelegram(chatId, text) {
+    try {
+        await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                chat_id: chatId, 
+                text: text, 
+                parse_mode: 'Markdown' 
+            })
+        });
+    } catch (e) { console.log("⚠️ فشل إرسال تيليجرام"); }
+}
+
+// دالة عالمية لتنسيق الأرقام
 function formatPhoneNumber(phone) {
-    // إزالة كل الرموز غير الرقمية
     let clean = phone.replace(/\D/g, '');
     
-    // محاولة تحليل الرقم بالمكتبة العالمية
     try {
         const phoneNumber = parsePhoneNumberFromString('+' + clean);
         if (phoneNumber && phoneNumber.isValid()) {
             return {
-                nationalNumber: phoneNumber.nationalNumber, // الرقم المحلي
-                countryCode: phoneNumber.countryCallingCode, // مفتاح الدولة
-                fullNumber: phoneNumber.number, // الرقم كامل مع +
+                nationalNumber: phoneNumber.nationalNumber,
+                countryCode: phoneNumber.countryCallingCode,
+                fullNumber: phoneNumber.number,
                 isValid: true
             };
         }
     } catch (e) {}
     
-    // إذا فشل التحليل، نستخدم الطريقة اليدوية
     if (clean.startsWith('00')) clean = clean.substring(2);
     if (clean.startsWith('0')) clean = clean.substring(1);
     
-    // تحديد مفتاح الدولة بناءً على طول الرقم وبادئته
-    let countryCode = '966'; // افتراضي سعودي
+    let countryCode = '966';
     let nationalNumber = clean;
     
-    if (clean.length === 12 && clean.startsWith('966')) { // 966554526287
+    if (clean.length === 12 && clean.startsWith('966')) {
         nationalNumber = clean.substring(3);
         countryCode = '966';
-    } else if (clean.length === 12 && clean.startsWith('967')) { // 967782203551
+    } else if (clean.length === 12 && clean.startsWith('967')) {
         nationalNumber = clean.substring(3);
         countryCode = '967';
-    } else if (clean.length === 11 && clean.startsWith('974')) { // 97433567890
+    } else if (clean.length === 11 && clean.startsWith('974')) {
         nationalNumber = clean.substring(3);
         countryCode = '974';
-    } else if (clean.length === 9 && clean.startsWith('5')) { // 554526287
+    } else if (clean.length === 9 && clean.startsWith('5')) {
         countryCode = '966';
-    } else if (clean.length === 9 && clean.startsWith('7')) { // 782203551
+    } else if (clean.length === 9 && clean.startsWith('7')) {
         countryCode = '967';
-    } else if (clean.length === 8 && /^[34567]/.test(clean)) { // 33567890
+    } else if (clean.length === 8 && /^[34567]/.test(clean)) {
         countryCode = '974';
     }
     
@@ -107,7 +124,6 @@ function formatPhoneNumber(phone) {
     };
 }
 
-// دالة للإرسال (تحتاج الرقم بصيغة محددة)
 function getJidFromPhone(phone) {
     const formatted = formatPhoneNumber(phone);
     return formatted.fullNumber.replace('+', '') + "@s.whatsapp.net";
@@ -148,55 +164,65 @@ async function saveIdentity() {
     }
 }
 
-async function startBot() {
-    if (isStarting) return;
-    isStarting = true;
-
-    const folder = './auth_info_stable';
-    if (!fs.existsSync(folder)) fs.mkdirSync(folder);
-    
-    await restoreIdentity();
-    
-    const { state, saveCreds } = await useMultiFileAuthState(folder);
-    const { version } = await fetchLatestBaileysVersion();
-    
-    sock = makeWASocket({ 
-        version, 
-        auth: state, 
-        logger: pino({ level: "silent" }), 
-        browser: ["CreativeStar", "Chrome", "1.0"],
-        printQRInTerminal: false, 
-        syncFullHistory: false
-    });
-
-    sock.ev.on('creds.update', async () => { 
-        await saveCreds(); 
-        await saveIdentity(); 
-    });
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, qr, lastDisconnect } = update;
-        if (qr) qrImage = await QRCode.toDataURL(qr);
-        if (connection === 'open') {
-            qrImage = "DONE";
-            isStarting = false;
-            console.log("🚀 البوت متصل");
+// --- 4. دوال النشر عبر الواتساب ---
+async function publishToWhatsApp(appName, link, description, chatId) {
+    try {
+        const usersSnapshot = await db.collection('users').get();
+        let targets = [];
+        
+        if (appName === "الجميع") {
+            targets = usersSnapshot.docs;
+        } else {
+            targets = usersSnapshot.docs.filter(d => d.data().appName === appName);
         }
-        if (connection === 'close') {
-            isStarting = false;
-            const code = (lastDisconnect.error instanceof Boom) ? lastDisconnect.error.output.statusCode : 0;
-            if (code !== DisconnectReason.loggedOut) {
-                setTimeout(() => startBot(), 10000);
+        
+        await sendTelegram(chatId, `🚀 جاري النشر لـ ${targets.length} مستخدم من تطبيق ${appName}...`);
+        
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (const d of targets) {
+            try {
+                const userPhone = d.data().phone;
+                await safeSend(getJidFromPhone(userPhone), { 
+                    text: `📢 *تحديث جديد!*\n\n${description}\n\n🔗 ${link}` 
+                });
+                successCount++;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (e) {
+                failCount++;
             }
         }
-    });
+        
+        const report = `✅ *تم النشر بنجاح!*\n\n📊 *الإحصائيات:*\n✓ تم الإرسال: ${successCount}\n✗ فشل: ${failCount}\n👥 المجموع: ${targets.length}`;
+        await sendTelegram(chatId, report);
+        
+    } catch (error) {
+        await sendTelegram(chatId, `❌ خطأ في النشر: ${error.message}`);
+    }
+}
+
+// --- 5. إعداد Webhook تيليجرام ---
+async function setupTelegramWebhook() {
+    if (!TELEGRAM_BOT_TOKEN) return;
+    
+    const webhookUrl = `https://threew3t3s3wts.onrender.com/telegram-webhook`;
+    try {
+        await fetch(`${TELEGRAM_API_URL}/setWebhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: webhookUrl })
+        });
+        console.log("✅ Webhook تيليجرام تم إعداده");
+    } catch (error) {
+        console.log("⚠️ فشل إعداد webhook:", error.message);
+    }
 }
 
 // ============================================
-// API محكم - يربط الكود بكل البيانات
+// API للواتساب (بدون تغيير)
 // ============================================
 
-// فحص الجهاز
 app.get("/check-device", async (req, res) => {
     try {
         const { id, appName } = req.query;
@@ -217,7 +243,6 @@ app.get("/check-device", async (req, res) => {
     }
 });
 
-// طلب كود
 app.get("/request-otp", async (req, res) => {
     try {
         const { phone, name, app: appName, deviceId } = req.query;
@@ -227,13 +252,11 @@ app.get("/request-otp", async (req, res) => {
         console.log("=".repeat(50));
         console.log("الرقم الأصلي:", phone);
         
-        // تنسيق الرقم
         const formatted = formatPhoneNumber(phone);
         console.log("الرقم بعد التنسيق:", formatted);
         
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // البيانات الكاملة (مرتبطة بالكود نفسه)
         const codeData = {
             otp: otp,
             name: name || 'مستخدم',
@@ -244,10 +267,8 @@ app.get("/request-otp", async (req, res) => {
             timestamp: Date.now()
         };
         
-        // تخزين في الذاكرة (مفتاح: الكود نفسه)
         pendingCodes.set(otp, codeData);
         
-        // تخزين في Firebase (مفتاح: الكود نفسه)
         await db.collection('pending_codes').doc(otp).set({
             otp: otp,
             name: name || 'مستخدم',
@@ -260,20 +281,14 @@ app.get("/request-otp", async (req, res) => {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        console.log(`📦 تم تخزين الكود ${otp} مع البيانات:`);
-        console.log(`   - الاسم: ${name}`);
-        console.log(`   - التطبيق: ${appName}`);
-        console.log(`   - الجهاز: ${deviceId}`);
+        console.log(`📦 تم تخزين الكود ${otp} للجهاز ${deviceId}`);
         
-        // إرسال الكود
         const jid = getJidFromPhone(phone);
-        console.log(`📱 جاري الإرسال إلى: ${jid}`);
-        
         await safeSend(jid, { 
             text: `🔐 مرحباً ${name}، كود تفعيل تطبيق ${appName} هو: *${otp}*` 
         });
         
-        console.log(`✅ تم الإرسال بنجاح`);
+        console.log(`✅ تم الإرسال`);
         res.status(200).send("OK");
         
     } catch (error) {
@@ -282,7 +297,6 @@ app.get("/request-otp", async (req, res) => {
     }
 });
 
-// التحقق من الكود - مع إرسال إشعار للمالك
 app.get("/verify-otp", async (req, res) => {
     try {
         const { phone, code } = req.query;
@@ -290,19 +304,13 @@ app.get("/verify-otp", async (req, res) => {
         console.log("=".repeat(50));
         console.log("🔍 محاولة تحقق");
         console.log("=".repeat(50));
-        console.log("الرقم المرسل:", phone);
-        console.log("الكود المرسل:", code);
+        console.log("الرقم:", phone);
+        console.log("الكود:", code);
         
-        // البحث بالكود فقط (لا داعي للرقم)
-        console.log(`🔍 البحث عن الكود ${code}...`);
-        
-        // 1. البحث في الذاكرة
         let codeData = pendingCodes.get(code);
         let source = "memory";
         
-        // 2. إذا لم يوجد، ابحث في Firebase
         if (!codeData) {
-            console.log(`🔍 البحث في Firebase...`);
             const fbDoc = await db.collection('pending_codes').doc(code).get();
             if (fbDoc.exists) {
                 codeData = fbDoc.data();
@@ -310,42 +318,32 @@ app.get("/verify-otp", async (req, res) => {
             }
         }
         
-        // 3. إذا لم يوجد نهائياً
         if (!codeData) {
-            console.log(`❌ الكود ${code} غير موجود`);
+            console.log(`❌ الكود غير موجود`);
             return res.status(401).send("FAIL");
         }
         
         console.log(`✅ تم العثور على الكود (${source})`);
-        console.log(`📱 البيانات المخزنة:`);
-        console.log(`   - الاسم: ${codeData.name}`);
-        console.log(`   - التطبيق: ${codeData.appName}`);
-        console.log(`   - الجهاز: ${codeData.deviceId}`);
         
-        // 4. التحقق من الصلاحية (10 دقائق)
         const timestamp = codeData.timestamp || (codeData.createdAt?.toDate?.()?.getTime() || 0);
         const now = Date.now();
         const diffMinutes = (now - timestamp) / (1000 * 60);
         
         if (diffMinutes > 10) {
-            console.log(`⏰ الكود منتهي الصلاحية (${diffMinutes.toFixed(1)} دقيقة)`);
+            console.log(`⏰ الكود منتهي الصلاحية`);
             pendingCodes.delete(code);
             await db.collection('pending_codes').doc(code).delete();
             return res.status(401).send("FAIL");
         }
         
-        // 5. نجاح التحقق
         console.log(`🎉 تحقق ناجح!`);
         
-        // تنسيق الرقم النهائي
         const finalPhone = codeData.formattedPhone?.fullNumber?.replace('+', '') || 
                           codeData.fullNumber?.replace('+', '') || 
                           phone.replace(/\D/g, '');
         
-        // مفتاح المستخدم (phone + appName)
         const userKey = finalPhone + "_" + codeData.appName;
         
-        // تسجيل المستخدم
         await db.collection('users').doc(userKey).set({ 
             name: codeData.name,
             phone: finalPhone,
@@ -356,49 +354,30 @@ app.get("/verify-otp", async (req, res) => {
         
         console.log(`✅ تم تسجيل المستخدم: ${userKey}`);
         
-        // ========== إرسال إشعار للمالك بالمستخدم الجديد ==========
+        // إرسال إشعار للمالك عبر الواتساب
         try {
             const ownerJid = getJidFromPhone(OWNER_NUMBER);
-            
-            // الحصول على التاريخ والوقت بالتنسيق العربي
             const now = new Date();
-            const dateStr = now.toLocaleDateString('ar-EG', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-            });
-            const timeStr = now.toLocaleTimeString('ar-EG', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            });
+            const dateStr = now.toLocaleDateString('ar-EG');
+            const timeStr = now.toLocaleTimeString('ar-EG');
             
-            // تحديد رمز الدولة بالعربية
             const countryNames = {
                 '966': '🇸🇦 السعودية',
                 '967': '🇾🇪 اليمن',
-                '974': '🇶🇦 قطر',
-                'unknown': '🌍 أخرى'
+                '974': '🇶🇦 قطر'
             };
-            const countryDisplay = countryNames[codeData.formattedPhone?.countryCode] || countryNames.unknown;
+            const countryDisplay = countryNames[codeData.formattedPhone?.countryCode] || '🌍 أخرى';
             
             const message = `🆕 *مستخدم جديد اشترك!*\n\n` +
                             `👤 *الاسم:* ${codeData.name}\n` +
                             `📱 *رقم الهاتف:* ${finalPhone}\n` +
                             `🌍 *الدولة:* ${countryDisplay}\n` +
                             `📲 *التطبيق:* ${codeData.appName}\n` +
-                            `🆔 *معرف الجهاز:* ${codeData.deviceId}\n` +
-                            `📅 *التاريخ:* ${dateStr}\n` +
-                            `⏰ *الوقت:* ${timeStr}`;
+                            `📅 *التاريخ:* ${dateStr} ${timeStr}`;
             
             await safeSend(ownerJid, { text: message });
-            console.log(`📨 تم إرسال إشعار للمالك بمستخدم جديد: ${codeData.name}`);
-        } catch (notifyError) {
-            console.log("⚠️ فشل إرسال إشعار للمالك:", notifyError.message);
-        }
-        // ====================================================
+        } catch (e) {}
         
-        // تنظيف الكود
         pendingCodes.delete(code);
         await db.collection('pending_codes').doc(code).delete();
         
@@ -409,6 +388,139 @@ app.get("/verify-otp", async (req, res) => {
         res.status(500).send("FAIL");
     }
 });
+
+// ============================================
+// Webhook تيليجرام للتحكم
+// ============================================
+
+app.post("/telegram-webhook", async (req, res) => {
+    try {
+        const message = req.body.message;
+        if (!message) return res.sendStatus(200);
+        
+        const chatId = message.chat.id;
+        const text = message.text;
+        const userId = message.from.id;
+        
+        // تحقق من أن المستخدم هو المسؤول
+        if (userId.toString() !== TELEGRAM_ADMIN_ID) {
+            await sendTelegram(chatId, "⛔ أنت غير مصرح باستخدام هذا البوت.");
+            return res.sendStatus(200);
+        }
+        
+        const currentState = telegramStates.get(chatId);
+        
+        // إذا كان المستخدم في حالة تفاعلية
+        if (currentState) {
+            if (text === "إلغاء") {
+                telegramStates.delete(chatId);
+                await sendTelegram(chatId, "❌ تم إلغاء العملية.");
+                return res.sendStatus(200);
+            }
+            
+            if (currentState.command === "نشر") {
+                // استلام الرابط
+                if (currentState.step === "waiting_link") {
+                    if (!text.startsWith('http')) {
+                        await sendTelegram(chatId, "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http");
+                        return res.sendStatus(200);
+                    }
+                    currentState.link = text;
+                    currentState.step = "waiting_desc";
+                    telegramStates.set(chatId, currentState);
+                    await sendTelegram(chatId, "✅ تم استلام الرابط.\nالآن أرسل *الوصف*:");
+                    return res.sendStatus(200);
+                }
+                
+                // استلام الوصف
+                if (currentState.step === "waiting_desc") {
+                    currentState.desc = text;
+                    currentState.step = "waiting_target";
+                    telegramStates.set(chatId, currentState);
+                    
+                    // جلب جميع أسماء التطبيقات
+                    const usersSnapshot = await db.collection('users').get();
+                    const appNames = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(name => name);
+                    
+                    let menu = "🎯 *اختر الجمهور المستهدف:*\n\n";
+                    menu += "0 - 🌐 *الجميع*\n\n";
+                    appNames.forEach((app, index) => {
+                        menu += `${index + 1} - 📱 *${app}*\n`;
+                    });
+                    menu += "\n💡 أرسل رقم الخيار المطلوب.\n";
+                    menu += "❌ أرسل *إلغاء* للإلغاء.";
+                    
+                    await sendTelegram(chatId, menu);
+                    return res.sendStatus(200);
+                }
+                
+                // استلام رقم الخيار والتنفيذ
+                if (currentState.step === "waiting_target") {
+                    const usersSnapshot = await db.collection('users').get();
+                    const appNames = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(name => name);
+                    
+                    let selectedApp = "";
+                    
+                    if (text === "0") {
+                        selectedApp = "الجميع";
+                    } else {
+                        const idx = parseInt(text) - 1;
+                        if (isNaN(idx) || idx < 0 || idx >= appNames.length) {
+                            await sendTelegram(chatId, "❌ رقم غير صحيح. أرسل *إلغاء* للإلغاء.");
+                            return res.sendStatus(200);
+                        }
+                        selectedApp = appNames[idx];
+                    }
+                    
+                    telegramStates.delete(chatId);
+                    
+                    // تنفيذ النشر عبر الواتساب
+                    await publishToWhatsApp(selectedApp, currentState.link, currentState.desc, chatId);
+                    
+                    return res.sendStatus(200);
+                }
+            }
+            return res.sendStatus(200);
+        }
+        
+        // الأوامر الرئيسية
+        if (text === "نجم نشر") {
+            telegramStates.set(chatId, { command: "نشر", step: "waiting_link" });
+            await sendTelegram(chatId, "🔗 *خطوة 1/3*\nأرسل *الرابط* الآن:");
+        }
+        else if (text === "نجم احصا") {
+            const usersSnap = await db.collection('users').get();
+            const appStats = {};
+            usersSnap.docs.forEach(doc => {
+                const appName = doc.data().appName || 'غير معروف';
+                appStats[appName] = (appStats[appName] || 0) + 1;
+            });
+            
+            let statsText = "📊 *إحصائيات المستخدمين:*\n\n";
+            statsText += `👥 *الإجمالي:* ${usersSnap.size}\n\n`;
+            statsText += "📱 *حسب التطبيق:*\n";
+            for (const [app, count] of Object.entries(appStats)) {
+                statsText += `• ${app}: ${count} مستخدم\n`;
+            }
+            await sendTelegram(chatId, statsText);
+        }
+        else if (text === "نجم حالة") {
+            await sendTelegram(chatId, "⚡ *البوت يعمل بشكل طبيعي*");
+        }
+        else {
+            await sendTelegram(chatId, "🌟 الأوامر المتاحة:\n\nنجم نشر - لنشر إعلان\nنجم احصا - لعرض الإحصائيات\nنجم حالة - لعرض حالة البوت");
+        }
+        
+        res.sendStatus(200);
+    } catch (error) {
+        console.error("❌ خطأ في تيليجرام:", error);
+        res.sendStatus(200);
+    }
+});
+
+// ============================================
+// الصفحات العامة
+// ============================================
 
 app.get("/ping", (req, res) => res.send("💓"));
 app.get("/", (req, res) => {
@@ -421,11 +533,17 @@ app.get("/", (req, res) => {
     }
 });
 
-app.listen(process.env.PORT || 10000, () => {
+// ============================================
+// تشغيل السيرفر
+// ============================================
+
+app.listen(process.env.PORT || 10000, async () => {
     console.log("=".repeat(50));
     console.log(`🚀 السيرفر يعمل على المنفذ ${process.env.PORT || 10000}`);
     console.log(`🌐 الرابط: https://threew3t3s3wts.onrender.com`);
     console.log(`📱 رقم المالك: ${OWNER_NUMBER}`);
     console.log("=".repeat(50));
+    
+    await setupTelegramWebhook();
     startBot();
 });
