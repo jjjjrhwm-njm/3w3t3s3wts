@@ -77,59 +77,27 @@ async function sendTelegram(chatId, text) {
     } catch (e) { console.log("⚠️ فشل إرسال تيليجرام"); }
 }
 
-// دالة عالمية لتنسيق الأرقام - تدعم جميع الدول العربية والإسلامية
+// دالة عالمية لتنسيق الأرقام - تدعم جميع الصيغ لجميع الدول العربية والإسلامية
 function formatPhoneNumber(phone) {
+    // تنظيف الرقم من أي رموز غير رقمية
     let clean = phone.replace(/\D/g, '');
     
-    // إزالة الصفر البادئ أو 00
-    if (clean.startsWith('00')) clean = clean.substring(2);
-    if (clean.startsWith('0')) clean = clean.substring(1);
+    // إذا كان الرقم فارغاً، نرجع خطأ
+    if (!clean || clean.length < 7) {
+        return {
+            nationalNumber: clean,
+            countryCode: '966',
+            fullNumber: '',
+            isValid: false,
+            countryName: '❌ رقم غير صالح'
+        };
+    }
     
-    // قائمة بجميع الدول العربية والإسلامية مع أطوال أرقامها وأنماطها
-    const countryPatterns = {
-        // دول مجلس التعاون الخليجي
-        '966': { length: 9, startsWith: ['5'], name: '🇸🇦 السعودية' },
-        '974': { length: 8, startsWith: ['3','4','5','6','7'], name: '🇶🇦 قطر' },
-        '973': { length: 8, startsWith: ['3'], name: '🇧🇭 البحرين' },
-        '968': { length: 8, startsWith: ['2','9'], name: '🇴🇲 عمان' },
-        '965': { length: 8, startsWith: ['5','6','9'], name: '🇰🇼 الكويت' },
-        '971': { length: 9, startsWith: ['5'], name: '🇦🇪 الإمارات' },
-        
-        // دول شرق آسيا وإفريقيا
-        '967': { length: 9, startsWith: ['7'], name: '🇾🇪 اليمن' },
-        '20': { length: 10, startsWith: ['1','2'], name: '🇪🇬 مصر' },
-        '962': { length: 9, startsWith: ['7'], name: '🇯🇴 الأردن' },
-        '964': { length: 10, startsWith: ['7'], name: '🇮🇶 العراق' },
-        '963': { length: 9, startsWith: ['9'], name: '🇸🇾 سوريا' },
-        '961': { length: 8, startsWith: ['3','7'], name: '🇱🇧 لبنان' },
-        
-        // شمال إفريقيا
-        '213': { length: 9, startsWith: ['5','6','7'], name: '🇩🇿 الجزائر' },
-        '212': { length: 9, startsWith: ['6','7'], name: '🇲🇦 المغرب' },
-        '216': { length: 8, startsWith: ['2','5','9'], name: '🇹🇳 تونس' },
-        '218': { length: 9, startsWith: ['9'], name: '🇱🇾 ليبيا' },
-        '222': { length: 8, startsWith: ['2'], name: '🇲🇷 موريتانيا' },
-        '249': { length: 9, startsWith: ['9'], name: '🇸🇩 السودان' },
-        
-        // دول إسلامية أخرى
-        '92': { length: 10, startsWith: ['3'], name: '🇵🇰 باكستان' },
-        '93': { length: 9, startsWith: ['7'], name: '🇦🇫 أفغانستان' },
-        '98': { length: 10, startsWith: ['9'], name: '🇮🇷 إيران' },
-        '90': { length: 10, startsWith: ['5'], name: '🇹🇷 تركيا' },
-        '91': { length: 10, startsWith: ['6','7','8','9'], name: '🇮🇳 الهند' },
-        '880': { length: 10, startsWith: ['1'], name: '🇧🇩 بنجلاديش' },
-        '60': { length: 9, startsWith: ['1'], name: '🇲🇾 ماليزيا' },
-        '62': { length: 10, startsWith: ['8'], name: '🇮🇩 إندونيسيا' },
-        '63': { length: 10, startsWith: ['9'], name: '🇵🇭 الفلبين' },
-        '94': { length: 9, startsWith: ['7'], name: '🇱🇰 سريلانكا' },
-        '95': { length: 8, startsWith: ['9'], name: '🇲🇲 ميانمار' },
-        '673': { length: 7, startsWith: ['2'], name: '🇧🇳 بروناي' },
-        '670': { length: 8, startsWith: ['7'], name: '🇹🇱 تيمور الشرقية' }
-    };
-    
-    // أولاً: محاولة التحقق باستخدام مكتبة libphonenumber-js (لأي رقم في العالم)
+    // محاولة التحقق باستخدام مكتبة libphonenumber-js (وهي الأذكى)
     try {
-        const phoneNumber = parsePhoneNumberFromString('+' + clean);
+        // نحاول مع أي صيغة، المكتبة تتعرف على الدولة تلقائياً
+        const phoneNumber = parsePhoneNumberFromString(phone);
+        
         if (phoneNumber && phoneNumber.isValid()) {
             return {
                 nationalNumber: phoneNumber.nationalNumber,
@@ -139,26 +107,252 @@ function formatPhoneNumber(phone) {
                 countryName: getCountryName(phoneNumber.countryCallingCode)
             };
         }
-    } catch (e) {}
+    } catch (e) {
+        // إذا فشلت المحاولة الأولى، نجرب بإضافة +
+        try {
+            const phoneNumber = parsePhoneNumberFromString('+' + clean);
+            if (phoneNumber && phoneNumber.isValid()) {
+                return {
+                    nationalNumber: phoneNumber.nationalNumber,
+                    countryCode: phoneNumber.countryCallingCode,
+                    fullNumber: phoneNumber.number,
+                    isValid: true,
+                    countryName: getCountryName(phoneNumber.countryCallingCode)
+                };
+            }
+        } catch (e2) {}
+    }
     
-    // ثانياً: إذا كان الرقم يحوي مفتاح دولة واضح (مثال: 966512345678)
+    // إذا وصلنا هنا، المكتبة ما تعرفت على الرقم
+    // نحاول نستنتج الدولة من طول الرقم وبدايته
+    
+    // إزالة الصفر البادئ إذا وجد
+    if (clean.startsWith('0')) {
+        clean = clean.substring(1);
+    }
+    
+    // إزالة 00 إذا وجدت
+    if (clean.startsWith('00')) {
+        clean = clean.substring(2);
+    }
+    
+    // قائمة بجميع الدول العربية والإسلامية مع أطوال أرقامها وأنماطها
+    const countryPatterns = {
+        // دول مجلس التعاون الخليجي
+        '966': { 
+            lengths: [9], 
+            startsWith: ['5'], 
+            name: '🇸🇦 السعودية',
+            alternativeLengths: [10, 12, 13, 14] // للأرقام مع مفاتيح
+        },
+        '974': { 
+            lengths: [8], 
+            startsWith: ['3','4','5','6','7'], 
+            name: '🇶🇦 قطر',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '973': { 
+            lengths: [8], 
+            startsWith: ['3'], 
+            name: '🇧🇭 البحرين',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '968': { 
+            lengths: [8], 
+            startsWith: ['2','9'], 
+            name: '🇴🇲 عمان',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '965': { 
+            lengths: [8], 
+            startsWith: ['5','6','9'], 
+            name: '🇰🇼 الكويت',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '971': { 
+            lengths: [9], 
+            startsWith: ['5'], 
+            name: '🇦🇪 الإمارات',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        
+        // دول شرق آسيا وإفريقيا
+        '967': { 
+            lengths: [9], 
+            startsWith: ['7'], 
+            name: '🇾🇪 اليمن',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '20': { 
+            lengths: [10], 
+            startsWith: ['1','2'], 
+            name: '🇪🇬 مصر',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '962': { 
+            lengths: [9], 
+            startsWith: ['7'], 
+            name: '🇯🇴 الأردن',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '964': { 
+            lengths: [10], 
+            startsWith: ['7'], 
+            name: '🇮🇶 العراق',
+            alternativeLengths: [13, 14, 15, 16]
+        },
+        '963': { 
+            lengths: [9], 
+            startsWith: ['9'], 
+            name: '🇸🇾 سوريا',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '961': { 
+            lengths: [8], 
+            startsWith: ['3','7'], 
+            name: '🇱🇧 لبنان',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        
+        // شمال إفريقيا
+        '213': { 
+            lengths: [9], 
+            startsWith: ['5','6','7'], 
+            name: '🇩🇿 الجزائر',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '212': { 
+            lengths: [9], 
+            startsWith: ['6','7'], 
+            name: '🇲🇦 المغرب',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '216': { 
+            lengths: [8], 
+            startsWith: ['2','5','9'], 
+            name: '🇹🇳 تونس',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '218': { 
+            lengths: [9], 
+            startsWith: ['9'], 
+            name: '🇱🇾 ليبيا',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '222': { 
+            lengths: [8], 
+            startsWith: ['2'], 
+            name: '🇲🇷 موريتانيا',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '249': { 
+            lengths: [9], 
+            startsWith: ['9'], 
+            name: '🇸🇩 السودان',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        
+        // دول إسلامية أخرى
+        '92': { 
+            lengths: [10], 
+            startsWith: ['3'], 
+            name: '🇵🇰 باكستان',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '93': { 
+            lengths: [9], 
+            startsWith: ['7'], 
+            name: '🇦🇫 أفغانستان',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '98': { 
+            lengths: [10], 
+            startsWith: ['9'], 
+            name: '🇮🇷 إيران',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '90': { 
+            lengths: [10], 
+            startsWith: ['5'], 
+            name: '🇹🇷 تركيا',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '91': { 
+            lengths: [10], 
+            startsWith: ['6','7','8','9'], 
+            name: '🇮🇳 الهند',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '880': { 
+            lengths: [10], 
+            startsWith: ['1'], 
+            name: '🇧🇩 بنجلاديش',
+            alternativeLengths: [13, 14, 15, 16]
+        },
+        '60': { 
+            lengths: [9], 
+            startsWith: ['1'], 
+            name: '🇲🇾 ماليزيا',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '62': { 
+            lengths: [10], 
+            startsWith: ['8'], 
+            name: '🇮🇩 إندونيسيا',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '63': { 
+            lengths: [10], 
+            startsWith: ['9'], 
+            name: '🇵🇭 الفلبين',
+            alternativeLengths: [12, 13, 14, 15]
+        },
+        '94': { 
+            lengths: [9], 
+            startsWith: ['7'], 
+            name: '🇱🇰 سريلانكا',
+            alternativeLengths: [11, 12, 13, 14]
+        },
+        '95': { 
+            lengths: [8], 
+            startsWith: ['9'], 
+            name: '🇲🇲 ميانمار',
+            alternativeLengths: [10, 11, 12, 13]
+        },
+        '673': { 
+            lengths: [7], 
+            startsWith: ['2'], 
+            name: '🇧🇳 بروناي',
+            alternativeLengths: [10, 11, 12, 13]
+        },
+        '670': { 
+            lengths: [8], 
+            startsWith: ['7'], 
+            name: '🇹🇱 تيمور الشرقية',
+            alternativeLengths: [11, 12, 13, 14]
+        }
+    };
+    
+    // محاولة تحديد الدولة بناءً على مفتاح الدولة في الرقم
     for (const [code, pattern] of Object.entries(countryPatterns)) {
-        const codeLength = code.length;
-        if (clean.length === codeLength + pattern.length && clean.startsWith(code)) {
-            const nationalNumber = clean.substring(codeLength);
-            return {
-                nationalNumber: nationalNumber,
-                countryCode: code,
-                fullNumber: '+' + code + nationalNumber,
-                isValid: true,
-                countryName: pattern.name
-            };
+        if (clean.startsWith(code)) {
+            const nationalNumber = clean.substring(code.length);
+            // التحقق من طول الرقم الوطني
+            if (pattern.lengths.includes(nationalNumber.length)) {
+                return {
+                    nationalNumber: nationalNumber,
+                    countryCode: code,
+                    fullNumber: '+' + code + nationalNumber,
+                    isValid: true,
+                    countryName: pattern.name
+                };
+            }
         }
     }
     
-    // ثالثاً: إذا كان الرقم بدون مفتاح دولة، نحاول تحديد الدولة بناءً على الطول وبداية الرقم
+    // محاولة تحديد الدولة بناءً على طول الرقم وبدايته (بدون مفتاح)
     for (const [code, pattern] of Object.entries(countryPatterns)) {
-        if (clean.length === pattern.length) {
+        if (pattern.lengths.includes(clean.length)) {
             for (const start of pattern.startsWith) {
                 if (clean.startsWith(start)) {
                     return {
@@ -173,11 +367,39 @@ function formatPhoneNumber(phone) {
         }
     }
     
-    // رابعاً: إذا لم نتمكن من التحديد، نستخدم مفتاح افتراضي (السعودية) مع وضع علامة غير موثوق
+    // إذا كان الرقم طويل جداً، نحاول نستخرج منه مفتاح الدولة
+    for (const [code, pattern] of Object.entries(countryPatterns)) {
+        const codeLength = code.length;
+        for (const altLength of pattern.alternativeLengths || []) {
+            if (clean.length === altLength && clean.startsWith(code)) {
+                const nationalNumber = clean.substring(codeLength);
+                // نتأكد أن الرقم الوطني بطول مناسب
+                if (pattern.lengths.includes(nationalNumber.length) || 
+                    nationalNumber.length >= pattern.lengths[0] - 1) {
+                    return {
+                        nationalNumber: nationalNumber,
+                        countryCode: code,
+                        fullNumber: '+' + code + nationalNumber,
+                        isValid: true,
+                        countryName: pattern.name
+                    };
+                }
+            }
+        }
+    }
+    
+    // إذا لم نتمكن من التحديد، نستخدم مفتاح افتراضي (السعودية) مع وضع علامة غير موثوق
+    // ولكن نحاول نصلح الرقم قدر الإمكان
+    let fixedNumber = clean;
+    // إذا كان الرقم يبدأ بصفر، نزيله
+    if (fixedNumber.startsWith('0')) {
+        fixedNumber = fixedNumber.substring(1);
+    }
+    
     return {
-        nationalNumber: clean,
+        nationalNumber: fixedNumber,
         countryCode: '966',
-        fullNumber: '+' + '966' + clean,
+        fullNumber: '+' + '966' + fixedNumber,
         isValid: false,
         countryName: '🌍 غير معروف'
     };
@@ -407,6 +629,12 @@ app.get("/request-otp", async (req, res) => {
         const formatted = formatPhoneNumber(phone);
         console.log("الرقم بعد التنسيق:", formatted);
         
+        // إذا كان الرقم غير صالح، نرجع خطأ
+        if (!formatted.isValid) {
+            console.log("❌ رقم غير صالح");
+            return res.status(400).send("INVALID_NUMBER");
+        }
+        
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
         const codeData = {
@@ -437,7 +665,7 @@ app.get("/request-otp", async (req, res) => {
         
         console.log(`📦 تم تخزين الكود ${otp} للجهاز ${deviceId} (الإصدار: ${version || '1.0'})`);
         
-        const jid = getJidFromPhone(phone);
+        const jid = getJidFromPhone(formatted.fullNumber);
         await safeSend(jid, { 
             text: `🔐 مرحباً ${name}، كود تفعيل تطبيق ${appName} هو: *${otp}*` 
         });
