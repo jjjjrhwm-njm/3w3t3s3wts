@@ -12,6 +12,7 @@ const fs = require("fs");
 const pino = require("pino");
 const https = require("https");
 const path = require("path");
+const { parsePhoneNumberFromString } = require('libphonenumber-js');
 
 const app = express();
 app.use(express.json());
@@ -50,95 +51,133 @@ async function safeSend(jid, content) {
     } catch (e) { console.log("⚠️ فشل الإرسال"); }
 }
 
-// دالة ذكية لتوحيد صيغة الرقم
+// دالة عالمية لتوحيد صيغة الرقم لأي دولة
 function formatPhoneNumber(phone) {
     // إزالة كل الرموز غير الرقمية
     let clean = phone.replace(/\D/g, '');
     
-    // إذا كان الرقم يبدأ بـ 00
-    if (clean.startsWith('00')) {
-        clean = clean.substring(2);
+    // محاولة تحليل الرقم باستخدام مكتبة libphonenumber
+    try {
+        // محاولة تحليل الرقم كمحلي أولاً (بدون مفتاح دولة)
+        let phoneNumber = parsePhoneNumberFromString(clean);
+        
+        // إذا فشل التحليل، حاول مع إضافة + في البداية
+        if (!phoneNumber || !phoneNumber.isValid()) {
+            phoneNumber = parsePhoneNumberFromString('+' + clean);
+        }
+        
+        // إذا كان الرقم صحيحاً
+        if (phoneNumber && phoneNumber.isValid()) {
+            return {
+                local: phoneNumber.nationalNumber,           // الرقم المحلي بدون مفتاح الدولة
+                full: phoneNumber.number,                     // الرقم كاملاً مع +
+                international: phoneNumber.number,            // نفس الرقم كاملاً
+                countryCode: phoneNumber.countryCallingCode,  // مفتاح الدولة (مثل 966 للسعودية)
+                isValid: true
+            };
+        }
+    } catch (e) {
+        console.log("⚠️ خطأ في تحليل الرقم:", e.message);
     }
     
-    // إذا كان الرقم يبدأ بـ 0 (صفر عربي أو إنجليزي)
-    if (clean.startsWith('0')) {
+    // إذا فشل التحليل، نحاول التعامل مع الصيغ الشائعة يدوياً
+    console.log("⚠️ استخدام الطريقة اليدوية للرقم:", clean);
+    
+    // إزالة الأصفار البادئة
+    while (clean.startsWith('0')) {
         clean = clean.substring(1);
     }
     
-    // إذا كان الرقم 9 أرقام ويبدأ بـ 5 (سعودي)
-    if (clean.length === 9 && clean.startsWith('5')) {
+    // التعامل مع الصيغ المختلفة
+    if (clean.startsWith('966') && clean.length > 9) { // سعودي مع المفتاح
         return {
-            local: clean,           // 554526287
-            full: '966' + clean,    // 966554526287
-            international: '966' + clean
+            local: clean.substring(3),
+            full: '+' + clean,
+            international: '+' + clean,
+            countryCode: '966',
+            isValid: true
         };
-    }
-    
-    // إذا كان الرقم 12 رقم ويبدأ بـ 966
-    if (clean.length === 12 && clean.startsWith('966')) {
+    } else if (clean.startsWith('967') && clean.length > 9) { // يمني مع المفتاح
         return {
-            local: clean.substring(3),  // 554526287
-            full: clean,                // 966554526287
-            international: clean
+            local: clean.substring(3),
+            full: '+' + clean,
+            international: '+' + clean,
+            countryCode: '967',
+            isValid: true
         };
-    }
-    
-    // إذا كان الرقم 10 أرقام (مثل 0554526287)
-    if (clean.length === 10 && clean.startsWith('5')) {
+    } else if (clean.startsWith('974') && clean.length > 9) { // قطري مع المفتاح
         return {
-            local: clean.substring(1),  // 554526287
-            full: '966' + clean.substring(1),
-            international: '966' + clean.substring(1)
+            local: clean.substring(3),
+            full: '+' + clean,
+            international: '+' + clean,
+            countryCode: '974',
+            isValid: true
         };
-    }
-    
-    // إذا كان الرقم 10 أرقام ويبدأ بـ 0
-    if (clean.length === 10 && clean.startsWith('0')) {
+    } else if (clean.startsWith('966') && clean.length === 12) { // سعودي
         return {
-            local: clean.substring(1),  // 554526287
-            full: '966' + clean.substring(1),
-            international: '966' + clean.substring(1)
+            local: clean.substring(3),
+            full: '+' + clean,
+            international: '+' + clean,
+            countryCode: '966',
+            isValid: true
         };
-    }
-    
-    // إذا كان الرقم 9 أرقام ولا يبدأ بـ 5
-    if (clean.length === 9) {
+    } else if (clean.startsWith('967') && clean.length === 12) { // يمني
         return {
-            local: clean,
-            full: '966' + clean,
-            international: '966' + clean
+            local: clean.substring(3),
+            full: '+' + clean,
+            international: '+' + clean,
+            countryCode: '967',
+            isValid: true
         };
-    }
-    
-    // إذا كان الرقم 8 أرقام (قطر مثلاً)
-    if (clean.length === 8 && /^[34567]/.test(clean)) {
+    } else if (clean.startsWith('974') && clean.length === 11) { // قطري
         return {
-            local: clean,
-            full: '974' + clean,
-            international: '974' + clean
+            local: clean.substring(3),
+            full: '+' + clean,
+            international: '+' + clean,
+            countryCode: '974',
+            isValid: true
         };
-    }
-    
-    // إذا كان الرقم 9 أرقام ويبدأ بـ 77 (يمني)
-    if (clean.length === 9 && /^(77|73|71|70)/.test(clean)) {
+    } else if (clean.length === 9 && clean.startsWith('7')) { // يمني بدون مفتاح
         return {
             local: clean,
-            full: '967' + clean,
-            international: '967' + clean
+            full: '+967' + clean,
+            international: '+967' + clean,
+            countryCode: '967',
+            isValid: true
+        };
+    } else if (clean.length === 8 && /^[34567]/.test(clean)) { // قطري بدون مفتاح
+        return {
+            local: clean,
+            full: '+974' + clean,
+            international: '+974' + clean,
+            countryCode: '974',
+            isValid: true
+        };
+    } else if (clean.length === 9 && clean.startsWith('5')) { // سعودي بدون مفتاح
+        return {
+            local: clean,
+            full: '+966' + clean,
+            international: '+966' + clean,
+            countryCode: '966',
+            isValid: true
         };
     }
     
-    // إذا لم يتطابق مع أي صيغة، نعيد الرقم كما هو
+    // إذا لم نتمكن من التعرف على الدولة، نفترض أن الرقم مكتمل
     return {
         local: clean,
-        full: clean,
-        international: clean
+        full: '+' + clean,
+        international: '+' + clean,
+        countryCode: 'unknown',
+        isValid: true
     };
 }
 
 function normalizePhone(phone) {
     const formatted = formatPhoneNumber(phone);
-    return formatted.full + "@s.whatsapp.net";
+    // إزالة + للإرسال عبر واتساب
+    const withoutPlus = formatted.full.replace('+', '');
+    return withoutPlus + "@s.whatsapp.net";
 }
 
 // --- 3. استعادة الهوية ---
@@ -223,7 +262,7 @@ async function startBot() {
 // --- تخزين مؤقت في الذاكرة ---
 const tempStorage = new Map();
 
-// --- API ذكي يتعامل مع أي صيغة رقم ---
+// --- API عالمي يتعامل مع أي رقم من أي دولة ---
 app.get("/check-device", async (req, res) => {
     try {
         const { id, appName } = req.query;
@@ -261,42 +300,49 @@ app.get("/request-otp", async (req, res) => {
         console.log("=".repeat(50));
         console.log("الرقم المرسل من التطبيق:", phone);
         
-        // تنسيق الرقم بشكل ذكي
+        // تنسيق الرقم بشكل عالمي
         const formatted = formatPhoneNumber(phone);
-        const localPhone = formatted.local;  // 554526287
-        const fullPhone = formatted.full;    // 966554526287
+        const localPhone = formatted.local;
+        const fullPhone = formatted.full.replace('+', ''); // نزيل + للتخزين
+        const countryCode = formatted.countryCode;
         
         console.log("الرقم بعد التنسيق (محلي):", localPhone);
         console.log("الرقم بعد التنسيق (كامل):", fullPhone);
+        console.log("مفتاح الدولة:", countryCode);
         console.log("الاسم:", name);
         console.log("التطبيق:", appName);
         console.log("معرف الجهاز:", deviceId);
         
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // تخزين في الذاكرة المؤقتة مع اسم التطبيق (باستخدام الرقم المحلي)
-        tempStorage.set(localPhone + "_" + appName, {
+        // مفتاح تخزين فريد (الرقم المحلي + اسم التطبيق)
+        const storageKey = localPhone + "_" + appName;
+        
+        // تخزين في الذاكرة المؤقتة
+        tempStorage.set(storageKey, {
             otp: otp,
             name: name || 'مستخدم',
             appName: appName || 'default',
             deviceId: deviceId || '',
             localPhone: localPhone,
             fullPhone: fullPhone,
+            countryCode: countryCode,
             timestamp: Date.now()
         });
         
-        // تخزين في Firebase مع اسم التطبيق (باستخدام الرقم المحلي)
-        await db.collection('temp_codes').doc(localPhone + "_" + appName).set({
+        // تخزين في Firebase
+        await db.collection('temp_codes').doc(storageKey).set({
             otp: otp,
             name: name || 'مستخدم',
             appName: appName || 'default',
             deviceId: deviceId || '',
             localPhone: localPhone,
             fullPhone: fullPhone,
+            countryCode: countryCode,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        console.log(`📦 تم تخزين الكود ${otp} للرقم ${localPhone} للتطبيق ${appName}`);
+        console.log(`📦 تم تخزين الكود ${otp} للرقم ${fullPhone} للتطبيق ${appName}`);
         console.log(`📱 جاري إرسال الكود إلى: ${fullPhone}`);
         
         await safeSend(normalizePhone(fullPhone), { 
@@ -321,10 +367,10 @@ app.get("/verify-otp", async (req, res) => {
         console.log("=".repeat(50));
         console.log("الرقم المرسل من التطبيق:", phone);
         
-        // تنسيق الرقم بشكل ذكي
+        // تنسيق الرقم بشكل عالمي
         const formatted = formatPhoneNumber(phone);
-        const localPhone = formatted.local;  // 554526287
-        const fullPhone = formatted.full;    // 966554526287
+        const localPhone = formatted.local;
+        const fullPhone = formatted.full.replace('+', '');
         
         console.log("الرقم بعد التنسيق (محلي):", localPhone);
         console.log("الرقم بعد التنسيق (كامل):", fullPhone);
@@ -374,6 +420,7 @@ app.get("/verify-otp", async (req, res) => {
         
         console.log(`📦 الكود المخزن: ${foundData.otp} (المصدر: ${source})`);
         console.log(`📱 اسم التطبيق: ${foundData.appName}`);
+        console.log(`🌍 مفتاح الدولة: ${foundData.countryCode || 'unknown'}`);
         
         // التحقق من الصلاحية (10 دقائق)
         const now = Date.now();
@@ -393,13 +440,18 @@ app.get("/verify-otp", async (req, res) => {
         
         console.log(`✅ تحقق ناجح! الكود صحيح`);
         
-        // استخدام الرقم الكامل من البيانات المخزنة أو تنسيقه
+        // استخدام الرقم الكامل من البيانات المخزنة
         const userFullPhone = foundData.fullPhone || fullPhone;
         
+        // مفتاح فريد للمستخدم (الرقم الكامل + اسم التطبيق)
+        const userKey = userFullPhone + "_" + foundData.appName;
+        
         // تسجيل المستخدم مع اسم التطبيق الخاص به
-        await db.collection('users').doc(userFullPhone + "_" + foundData.appName).set({ 
+        await db.collection('users').doc(userKey).set({ 
             name: foundData.name || 'مستخدم',
             phone: userFullPhone,
+            localPhone: foundData.localPhone,
+            countryCode: foundData.countryCode || 'unknown',
             appName: foundData.appName || 'default',
             deviceId: foundData.deviceId || '',
             verifiedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -413,7 +465,7 @@ app.get("/verify-otp", async (req, res) => {
         
         // إبلاغ الإدمن
         await safeSend(normalizePhone(myNumber), { 
-            text: `🆕 مستخدم جديد: ${userFullPhone}\n📱 التطبيق: ${foundData.appName}` 
+            text: `🆕 مستخدم جديد: ${userFullPhone}\n📱 التطبيق: ${foundData.appName}\n🌍 الدولة: ${foundData.countryCode || 'unknown'}` 
         });
         
         console.log(`🎉 تم تسجيل المستخدم بنجاح للتطبيق ${foundData.appName}`);
