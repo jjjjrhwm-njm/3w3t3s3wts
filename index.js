@@ -142,20 +142,24 @@ async function startBot() {
 // --- تخزين مؤقت في الذاكرة ---
 const tempStorage = new Map();
 
-// --- API مطابق لتطبيقك تماماً ---
+// --- API مع تحسين المراقبة ---
 app.get("/check-device", async (req, res) => {
     try {
         const { id, appName } = req.query;
-        console.log(`🔍 فحص الجهاز: ${id}`);
+        console.log(`🔍 فحص الجهاز: ${id}, التطبيق: ${appName}`);
         
-        const snap = await db.collection('users').where("deviceId", "==", id).where("appName", "==", appName).get();
+        // نبحث بالـ deviceId فقط
+        const snap = await db.collection('users').where("deviceId", "==", id).get();
         
         if (!snap.empty) {
+            console.log(`✅ جهاز موجود: ${id}`);
             return res.status(200).send("SUCCESS");
         } else {
+            console.log(`❌ جهاز جديد: ${id}`);
             return res.status(404).send("NOT_FOUND");
         }
     } catch (error) {
+        console.error("❌ خطأ في check-device:", error);
         res.status(500).send("ERROR");
     }
 });
@@ -163,13 +167,17 @@ app.get("/check-device", async (req, res) => {
 app.get("/request-otp", async (req, res) => {
     try {
         const { phone, name, app: appName, deviceId } = req.query;
-        // مهم: لا تقم بتنسيق الرقم، استخدمه كما هو من التطبيق
-        const rawPhone = phone;
+        
+        console.log("========== طلب كود جديد ==========");
+        console.log("الرقم المرسل من التطبيق:", phone);
+        console.log("الاسم:", name);
+        console.log("التطبيق:", appName);
+        console.log("معرف الجهاز:", deviceId);
+        
+        const rawPhone = phone; // 554526287
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        console.log(`📱 طلب كود: ${rawPhone} الكود: ${otp}`);
-        
-        // تخزين في الذاكرة المؤقتة باستخدام الرقم الأصلي
+        // تخزين في الذاكرة المؤقتة
         tempStorage.set(rawPhone, {
             otp: otp,
             name: name || 'مستخدم',
@@ -178,7 +186,7 @@ app.get("/request-otp", async (req, res) => {
             timestamp: Date.now()
         });
         
-        // تخزين في Firebase باستخدام الرقم الأصلي
+        // تخزين في Firebase
         await db.collection('temp_codes').doc(rawPhone).set({
             otp: otp,
             name: name || 'مستخدم',
@@ -187,14 +195,21 @@ app.get("/request-otp", async (req, res) => {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        // إرسال الكود (نستخدم normalizePhone فقط للإرسال)
-        await safeSend(normalizePhone(rawPhone), { 
-            text: `🔐 كود التفعيل: *${otp}*` 
+        console.log(`📦 تم تخزين الكود ${otp} للرقم ${rawPhone}`);
+        
+        // تحويل الرقم للصيغة الدولية للإرسال
+        const fullPhone = "966" + rawPhone; // 966554526287
+        console.log(`📱 جاري إرسال الكود إلى: ${fullPhone}`);
+        
+        await safeSend(normalizePhone(fullPhone), { 
+            text: `🔐 كود التفعيل الخاص بك هو: *${otp}*` 
         });
         
+        console.log(`✅ تم إرسال الكود بنجاح`);
         res.status(200).send("OK");
+        
     } catch (error) {
-        console.error("❌ خطأ:", error);
+        console.error("❌ خطأ في request-otp:", error);
         res.status(500).send("Error");
     }
 });
@@ -202,23 +217,30 @@ app.get("/request-otp", async (req, res) => {
 app.get("/verify-otp", async (req, res) => {
     try {
         const { phone, code } = req.query;
-        // مهم: استخدم الرقم كما هو من التطبيق بدون تنسيق
-        const rawPhone = phone;
+        
+        console.log("========== محاولة تحقق ==========");
+        console.log("الرقم المرسل من التطبيق:", phone);
+        console.log("الكود المرسل من التطبيق:", code);
+        
+        const rawPhone = phone; // 554526287
         const inputCode = code.toString().trim();
         
-        console.log(`🔍 تحقق: ${rawPhone} الكود: ${inputCode}`);
-        
-        // 1. البحث في الذاكرة المؤقتة أولاً باستخدام الرقم الأصلي
+        // 1. البحث في الذاكرة المؤقتة
+        console.log(`🔍 البحث في الذاكرة المؤقتة عن الرقم: ${rawPhone}`);
         let data = tempStorage.get(rawPhone);
         let source = "memory";
         
-        // 2. إذا لم يوجد، ابحث في Firebase باستخدام الرقم الأصلي
+        // 2. إذا لم يوجد، ابحث في Firebase
         if (!data) {
+            console.log(`🔍 البحث في Firebase عن الرقم: ${rawPhone}`);
             const fbDoc = await db.collection('temp_codes').doc(rawPhone).get();
             if (fbDoc.exists) {
                 data = fbDoc.data();
                 source = "firebase";
+                console.log(`✅ وجد في Firebase`);
             }
+        } else {
+            console.log(`✅ وجد في الذاكرة المؤقتة`);
         }
         
         if (!data) {
@@ -227,11 +249,14 @@ app.get("/verify-otp", async (req, res) => {
         }
         
         const storedOtp = data.otp.toString().trim();
+        console.log(`📦 الكود المخزن: ${storedOtp} (المصدر: ${source})`);
         
         // التحقق من الصلاحية (10 دقائق)
         const now = Date.now();
         const timestamp = data.timestamp || (data.createdAt?.toDate?.()?.getTime() || now);
         const diffMinutes = (now - timestamp) / (1000 * 60);
+        
+        console.log(`⏰ عمر الكود: ${diffMinutes.toFixed(1)} دقيقة`);
         
         if (diffMinutes > 10) {
             console.log(`⏰ الكود منتهي الصلاحية`);
@@ -242,15 +267,15 @@ app.get("/verify-otp", async (req, res) => {
         
         // مقارنة الكود
         if (storedOtp === inputCode) {
-            console.log(`✅ تحقق ناجح من ${source}: ${rawPhone}`);
+            console.log(`✅ تحقق ناجح! الكود صحيح`);
             
-            // تنسيق الرقم للتخزين في Firebase
-            const formattedPhone = rawPhone.replace(/\D/g, '');
+            // تنسيق الرقم كاملاً مع المفتاح
+            const fullPhone = "966" + rawPhone; // 966554526287
             
-            // تسجيل المستخدم في Firebase
-            await db.collection('users').doc(formattedPhone).set({ 
+            // تسجيل المستخدم
+            await db.collection('users').doc(fullPhone).set({ 
                 name: data.name || 'مستخدم',
-                phone: formattedPhone,
+                phone: fullPhone,
                 appName: data.appName || 'default',
                 deviceId: data.deviceId || '',
                 verifiedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -262,16 +287,19 @@ app.get("/verify-otp", async (req, res) => {
             
             // إبلاغ الإدمن
             await safeSend(normalizePhone(myNumber), { 
-                text: `🆕 مستخدم جديد: ${formattedPhone}` 
+                text: `🆕 مستخدم جديد: ${fullPhone}` 
             });
             
+            console.log(`🎉 تم تسجيل المستخدم بنجاح`);
             return res.status(200).send("SUCCESS");
+            
         } else {
             console.log(`❌ كود خطأ: المدخل ${inputCode} ≠ المخزن ${storedOtp}`);
             return res.status(401).send("FAIL");
         }
+        
     } catch (error) {
-        console.error("❌ خطأ:", error);
+        console.error("❌ خطأ في verify-otp:", error);
         res.status(500).send("FAIL");
     }
 });
@@ -288,7 +316,9 @@ app.get("/", (req, res) => {
 });
 
 app.listen(process.env.PORT || 10000, () => {
+    console.log("=".repeat(50));
     console.log(`🚀 السيرفر يعمل على المنفذ ${process.env.PORT || 10000}`);
     console.log(`📌 الرابط: https://threew3t3s3wts.onrender.com`);
+    console.log("=".repeat(50));
     startBot();
 });
