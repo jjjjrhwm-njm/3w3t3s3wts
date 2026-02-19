@@ -22,6 +22,9 @@ let qrImage = "";
 let isStarting = false;
 const myNumber = "966554526287";
 
+// --- حالة المستخدمين للأوامر التفاعلية ---
+const userState = new Map(); // لتخزين حالة كل مستخدم
+
 // --- 1. إعداد Firebase ---
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 if (!admin.apps.length) {
@@ -215,6 +218,171 @@ async function saveIdentity() {
     }
 }
 
+// --- 4. محرك الأوامر التفاعلي (لأي رقم) ---
+async function processCommand(jid, text, sender, isMe) {
+    // ✅ تم التعديل هنا: إزالة شرط التحقق من الرقم
+    // الآن أي شخص يمكنه استخدام الأوامر
+
+    const currentState = userState.get(jid);
+
+    // إذا كان المستخدم في حالة تفاعلية (نشر)
+    if (currentState) {
+        // أمر الإلغاء
+        if (text.toLowerCase() === "الغاء" || text === "خروج" || text === "إلغاء") {
+            userState.delete(jid);
+            await safeSend(jid, { text: "❌ تم إلغاء العملية بنجاح." });
+            return true;
+        }
+
+        // معالجة خطوات النشر
+        if (currentState.command === "نشر") {
+            // الخطوة 1: استلام الرابط
+            if (currentState.step === "waiting_link") {
+                if (!text.startsWith('http')) {
+                    await safeSend(jid, { text: "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http" });
+                    return true;
+                }
+                currentState.link = text;
+                currentState.step = "waiting_desc";
+                userState.set(jid, currentState);
+                await safeSend(jid, { text: "✅ تم استلام الرابط.\nالآن أرسل *الوصف* (يمكن أن يكون نصاً مع صور)" });
+                return true;
+            }
+
+            // الخطوة 2: استلام الوصف
+            if (currentState.step === "waiting_desc") {
+                currentState.desc = text;
+                currentState.step = "waiting_target";
+                userState.set(jid, currentState);
+                
+                // جلب جميع أسماء التطبيقات الفريدة من قاعدة البيانات
+                const usersSnapshot = await db.collection('users').get();
+                const appNames = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(name => name && name !== 'default');
+                
+                let menu = "🎯 *اختر الجمهور المستهدف:*\n\n";
+                menu += "0 - 🌐 *الجميع*\n\n";
+                
+                appNames.forEach((app, index) => {
+                    menu += `${index + 1} - 📱 *${app}*\n`;
+                });
+                
+                menu += "\n💡 أرسل رقم الخيار المطلوب.\n";
+                menu += "❌ أرسل *إلغاء* للإلغاء.";
+                
+                await safeSend(jid, { text: menu });
+                return true;
+            }
+
+            // الخطوة 3: التنفيذ النهائي
+            if (currentState.step === "waiting_target") {
+                const usersSnapshot = await db.collection('users').get();
+                const appNames = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(name => name && name !== 'default');
+                
+                let targets = [];
+                let targetDescription = "";
+
+                // إذا اختار الجميع
+                if (text === "0") { 
+                    targets = usersSnapshot.docs;
+                    targetDescription = "الجميع";
+                } else {
+                    const idx = parseInt(text) - 1;
+                    if (isNaN(idx) || idx < 0 || idx >= appNames.length) {
+                        await safeSend(jid, { text: "❌ رقم غير صحيح. اختر من القائمة أو أرسل *إلغاء*." });
+                        return true;
+                    }
+                    const selectedApp = appNames[idx];
+                    targets = usersSnapshot.docs.filter(d => d.data().appName === selectedApp);
+                    targetDescription = `تطبيق *${selectedApp}*`;
+                }
+
+                await safeSend(jid, { text: `🚀 جاري النشر لـ ${targets.length} مستخدم من ${targetDescription}...` });
+                
+                let successCount = 0;
+                let failCount = 0;
+                
+                for (const d of targets) {
+                    try {
+                        const userPhone = d.data().phone;
+                        // تنسيق الرسالة
+                        const messageContent = { 
+                            text: `📢 *تحديث جديد!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
+                        };
+                        
+                        await safeSend(normalizePhone(userPhone), messageContent);
+                        successCount++;
+                    } catch (e) {
+                        failCount++;
+                        console.log(`❌ فشل إرسال إلى ${d.data().phone}:`, e.message);
+                    }
+                    
+                    // تأخير بسيط بين الرسائل
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+                
+                // إنهاء الحالة التفاعلية
+                userState.delete(jid);
+                
+                // إرسال تقرير نهائي
+                const report = `✅ *تم النشر بنجاح!*\n\n📊 *الإحصائيات:*\n✓ تم الإرسال: ${successCount}\n✗ فشل: ${failCount}\n👥 المجموع: ${targets.length}\n🎯 المستهدف: ${targetDescription}`;
+                await safeSend(jid, { text: report });
+                
+                return true;
+            }
+        }
+        return true;
+    }
+
+    // الأوامر الرئيسية - أي شخص يمكنه استخدامها الآن
+    if (!text.startsWith("نجم")) return false;
+
+    switch (text) {
+        case "نجم":
+        case "نجم مساعدة":
+            await safeSend(jid, { text: `🌟 *أوامر نجم الإبداع:*
+
+1️⃣ *نجم نشر* - نشر إعلان (خطوات تفاعلية)
+2️⃣ *نجم احصا* - إحصائيات المستخدمين
+3️⃣ *نجم حالة* - حالة البوت
+
+💡 أرسل *إلغاء* أثناء النشر للإلغاء.` });
+            break;
+            
+        case "نجم نشر":
+            userState.set(jid, { command: "نشر", step: "waiting_link" });
+            await safeSend(jid, { text: "🔗 *خطوة 1/3*\nأرسل *رابط التطبيق* الآن:" });
+            break;
+            
+        case "نجم احصا":
+            const usersSnap = await db.collection('users').get();
+            const appStats = {};
+            usersSnap.docs.forEach(doc => {
+                const appName = doc.data().appName || 'غير معروف';
+                appStats[appName] = (appStats[appName] || 0) + 1;
+            });
+            
+            let statsText = "📊 *إحصائيات المستخدمين:*\n\n";
+            statsText += `👥 *الإجمالي:* ${usersSnap.size}\n\n`;
+            statsText += "📱 *حسب التطبيق:*\n";
+            
+            for (const [app, count] of Object.entries(appStats)) {
+                statsText += `• ${app}: ${count} مستخدم\n`;
+            }
+            
+            await safeSend(jid, { text: statsText });
+            break;
+            
+        case "نجم حالة":
+            const uptime = process.uptime();
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            
+            await safeSend(jid, { text: `⚡ *حالة البوت:*\n\n✅ البوت: متصل\n⏱️ وقت التشغيل: ${hours} ساعة ${minutes} دقيقة` });
+            break;
+    }
+    return true;
+}
+
 async function startBot() {
     if (isStarting) return;
     isStarting = true;
@@ -239,6 +407,25 @@ async function startBot() {
     sock.ev.on('creds.update', async () => { 
         await saveCreds(); 
         await saveIdentity(); 
+    });
+
+    // معالجة الرسائل الواردة
+    sock.ev.on('messages.upsert', async (m) => {
+        try {
+            const msg = m.messages[0];
+            if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+
+            const jid = msg.key.remoteJid;
+            const isMe = msg.key.fromMe;
+            const sender = jid.split('@')[0].split(':')[0];
+            const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || "").trim();
+
+            if (!text) return;
+
+            // معالجة الأوامر
+            await processCommand(jid, text, sender, isMe);
+            
+        } catch (e) { console.log("❌ خطأ معالجة الرسالة:", e.message); }
     });
 
     sock.ev.on('connection.update', async (update) => {
