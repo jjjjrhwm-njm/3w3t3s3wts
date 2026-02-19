@@ -218,10 +218,10 @@ async function saveIdentity() {
     }
 }
 
-// --- 4. محرك الأوامر التفاعلي (لأي رقم) ---
+// --- 4. محرك الأوامر التفاعلي ---
 async function processCommand(jid, text, sender, isMe) {
-    // ✅ تم التعديل هنا: إزالة شرط التحقق من الرقم
-    // الآن أي شخص يمكنه استخدام الأوامر
+    // السماح فقط للإدمن (رقمك)
+    if (sender !== myNumber && !isMe) return false;
 
     const currentState = userState.get(jid);
 
@@ -304,10 +304,20 @@ async function processCommand(jid, text, sender, isMe) {
                 for (const d of targets) {
                     try {
                         const userPhone = d.data().phone;
-                        // تنسيق الرسالة
-                        const messageContent = { 
-                            text: `📢 *تحديث جديد!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
-                        };
+                        // تنسيق الرسالة حسب ما إذا كان هناك صورة أم لا
+                        let messageContent = {};
+                        
+                        // التحقق مما إذا كان الوصف يحتوي على رابط صورة أو مجرد نص
+                        if (currentState.desc.match(/\.(jpg|jpeg|png|gif|webp)$/i) || currentState.desc.includes('http')) {
+                            // إذا كان الوصف قد يكون رابط صورة، نرسله كنص عادي
+                            messageContent = { 
+                                text: `📢 *تحديث جديد!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
+                            };
+                        } else {
+                            messageContent = { 
+                                text: `📢 *تحديث جديد!*\n\n${currentState.desc}\n\n🔗 ${currentState.link}` 
+                            };
+                        }
                         
                         await safeSend(normalizePhone(userPhone), messageContent);
                         successCount++;
@@ -333,7 +343,7 @@ async function processCommand(jid, text, sender, isMe) {
         return true;
     }
 
-    // الأوامر الرئيسية - أي شخص يمكنه استخدامها الآن
+    // الأوامر الرئيسية
     if (!text.startsWith("نجم")) return false;
 
     switch (text) {
@@ -377,7 +387,7 @@ async function processCommand(jid, text, sender, isMe) {
             const hours = Math.floor(uptime / 3600);
             const minutes = Math.floor((uptime % 3600) / 60);
             
-            await safeSend(jid, { text: `⚡ *حالة البوت:*\n\n✅ البوت: متصل\n⏱️ وقت التشغيل: ${hours} ساعة ${minutes} دقيقة` });
+            await safeSend(jid, { text: `⚡ *حالة البوت:*\n\n✅ البوت: متصل\n⏱️ وقت التشغيل: ${hours} ساعة ${minutes} دقيقة\n📱 الرقم: ${myNumber}` });
             break;
     }
     return true;
