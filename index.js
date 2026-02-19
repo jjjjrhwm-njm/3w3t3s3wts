@@ -50,14 +50,95 @@ async function safeSend(jid, content) {
     } catch (e) { console.log("⚠️ فشل الإرسال"); }
 }
 
+// دالة ذكية لتوحيد صيغة الرقم
+function formatPhoneNumber(phone) {
+    // إزالة كل الرموز غير الرقمية
+    let clean = phone.replace(/\D/g, '');
+    
+    // إذا كان الرقم يبدأ بـ 00
+    if (clean.startsWith('00')) {
+        clean = clean.substring(2);
+    }
+    
+    // إذا كان الرقم يبدأ بـ 0 (صفر عربي أو إنجليزي)
+    if (clean.startsWith('0')) {
+        clean = clean.substring(1);
+    }
+    
+    // إذا كان الرقم 9 أرقام ويبدأ بـ 5 (سعودي)
+    if (clean.length === 9 && clean.startsWith('5')) {
+        return {
+            local: clean,           // 554526287
+            full: '966' + clean,    // 966554526287
+            international: '966' + clean
+        };
+    }
+    
+    // إذا كان الرقم 12 رقم ويبدأ بـ 966
+    if (clean.length === 12 && clean.startsWith('966')) {
+        return {
+            local: clean.substring(3),  // 554526287
+            full: clean,                // 966554526287
+            international: clean
+        };
+    }
+    
+    // إذا كان الرقم 10 أرقام (مثل 0554526287)
+    if (clean.length === 10 && clean.startsWith('5')) {
+        return {
+            local: clean.substring(1),  // 554526287
+            full: '966' + clean.substring(1),
+            international: '966' + clean.substring(1)
+        };
+    }
+    
+    // إذا كان الرقم 10 أرقام ويبدأ بـ 0
+    if (clean.length === 10 && clean.startsWith('0')) {
+        return {
+            local: clean.substring(1),  // 554526287
+            full: '966' + clean.substring(1),
+            international: '966' + clean.substring(1)
+        };
+    }
+    
+    // إذا كان الرقم 9 أرقام ولا يبدأ بـ 5
+    if (clean.length === 9) {
+        return {
+            local: clean,
+            full: '966' + clean,
+            international: '966' + clean
+        };
+    }
+    
+    // إذا كان الرقم 8 أرقام (قطر مثلاً)
+    if (clean.length === 8 && /^[34567]/.test(clean)) {
+        return {
+            local: clean,
+            full: '974' + clean,
+            international: '974' + clean
+        };
+    }
+    
+    // إذا كان الرقم 9 أرقام ويبدأ بـ 77 (يمني)
+    if (clean.length === 9 && /^(77|73|71|70)/.test(clean)) {
+        return {
+            local: clean,
+            full: '967' + clean,
+            international: '967' + clean
+        };
+    }
+    
+    // إذا لم يتطابق مع أي صيغة، نعيد الرقم كما هو
+    return {
+        local: clean,
+        full: clean,
+        international: clean
+    };
+}
+
 function normalizePhone(phone) {
-    let clean = phone.replace(/\D/g, ''); 
-    if (clean.startsWith('00')) clean = clean.substring(2);
-    if (clean.startsWith('0')) clean = clean.substring(1);
-    if (clean.length === 9 && clean.startsWith('5')) clean = '966' + clean;
-    else if (clean.length === 9 && /^(77|73|71|70)/.test(clean)) clean = '967' + clean;
-    else if (clean.length === 8 && /^[34567]/.test(clean)) clean = '974' + clean;
-    return clean + "@s.whatsapp.net";
+    const formatted = formatPhoneNumber(phone);
+    return formatted.full + "@s.whatsapp.net";
 }
 
 // --- 3. استعادة الهوية ---
@@ -142,7 +223,7 @@ async function startBot() {
 // --- تخزين مؤقت في الذاكرة ---
 const tempStorage = new Map();
 
-// --- API مع تحسين المراقبة والتحقق من اسم التطبيق ---
+// --- API ذكي يتعامل مع أي صيغة رقم ---
 app.get("/check-device", async (req, res) => {
     try {
         const { id, appName } = req.query;
@@ -179,35 +260,43 @@ app.get("/request-otp", async (req, res) => {
         console.log("📱 طلب كود جديد");
         console.log("=".repeat(50));
         console.log("الرقم المرسل من التطبيق:", phone);
+        
+        // تنسيق الرقم بشكل ذكي
+        const formatted = formatPhoneNumber(phone);
+        const localPhone = formatted.local;  // 554526287
+        const fullPhone = formatted.full;    // 966554526287
+        
+        console.log("الرقم بعد التنسيق (محلي):", localPhone);
+        console.log("الرقم بعد التنسيق (كامل):", fullPhone);
         console.log("الاسم:", name);
         console.log("التطبيق:", appName);
         console.log("معرف الجهاز:", deviceId);
         
-        const rawPhone = phone; // 554526287
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // تخزين في الذاكرة المؤقتة مع اسم التطبيق
-        tempStorage.set(rawPhone + "_" + appName, {
+        // تخزين في الذاكرة المؤقتة مع اسم التطبيق (باستخدام الرقم المحلي)
+        tempStorage.set(localPhone + "_" + appName, {
             otp: otp,
             name: name || 'مستخدم',
             appName: appName || 'default',
             deviceId: deviceId || '',
+            localPhone: localPhone,
+            fullPhone: fullPhone,
             timestamp: Date.now()
         });
         
-        // تخزين في Firebase مع اسم التطبيق
-        await db.collection('temp_codes').doc(rawPhone + "_" + appName).set({
+        // تخزين في Firebase مع اسم التطبيق (باستخدام الرقم المحلي)
+        await db.collection('temp_codes').doc(localPhone + "_" + appName).set({
             otp: otp,
             name: name || 'مستخدم',
             appName: appName || 'default',
             deviceId: deviceId || '',
+            localPhone: localPhone,
+            fullPhone: fullPhone,
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        console.log(`📦 تم تخزين الكود ${otp} للرقم ${rawPhone} للتطبيق ${appName}`);
-        
-        // تحويل الرقم للصيغة الدولية للإرسال
-        const fullPhone = "966" + rawPhone; // 966554526287
+        console.log(`📦 تم تخزين الكود ${otp} للرقم ${localPhone} للتطبيق ${appName}`);
         console.log(`📱 جاري إرسال الكود إلى: ${fullPhone}`);
         
         await safeSend(normalizePhone(fullPhone), { 
@@ -231,15 +320,19 @@ app.get("/verify-otp", async (req, res) => {
         console.log("🔍 محاولة تحقق");
         console.log("=".repeat(50));
         console.log("الرقم المرسل من التطبيق:", phone);
+        
+        // تنسيق الرقم بشكل ذكي
+        const formatted = formatPhoneNumber(phone);
+        const localPhone = formatted.local;  // 554526287
+        const fullPhone = formatted.full;    // 966554526287
+        
+        console.log("الرقم بعد التنسيق (محلي):", localPhone);
+        console.log("الرقم بعد التنسيق (كامل):", fullPhone);
         console.log("الكود المرسل من التطبيق:", code);
         
-        const rawPhone = phone; // 554526287
         const inputCode = code.toString().trim();
         
-        // ملاحظة: هنا نحتاج اسم التطبيق أيضاً، لكن التطبيق لا يرسله في طلب التحقق!
-        // لذلك سنبحث في جميع الأكواد المخزنة لهذا الرقم ونتحقق من الكود
-        
-        console.log(`🔍 البحث عن الكود للرقم: ${rawPhone}`);
+        console.log(`🔍 البحث عن الكود للرقم: ${localPhone}`);
         
         // البحث في الذاكرة المؤقتة
         let foundData = null;
@@ -248,7 +341,7 @@ app.get("/verify-otp", async (req, res) => {
         
         // البحث في الذاكرة المؤقتة
         for (let [key, value] of tempStorage.entries()) {
-            if (key.startsWith(rawPhone + "_") && value.otp.toString().trim() === inputCode) {
+            if (key.startsWith(localPhone + "_") && value.otp.toString().trim() === inputCode) {
                 foundData = value;
                 foundKey = key;
                 break;
@@ -262,7 +355,7 @@ app.get("/verify-otp", async (req, res) => {
             
             for (const doc of fbSnapshot.docs) {
                 const docId = doc.id;
-                if (docId.startsWith(rawPhone + "_")) {
+                if (docId.startsWith(localPhone + "_")) {
                     const data = doc.data();
                     if (data.otp.toString().trim() === inputCode) {
                         foundData = data;
@@ -275,7 +368,7 @@ app.get("/verify-otp", async (req, res) => {
         }
         
         if (!foundData) {
-            console.log(`❌ لا يوجد كود صحيح للرقم: ${rawPhone}`);
+            console.log(`❌ لا يوجد كود صحيح للرقم: ${localPhone}`);
             return res.status(401).send("FAIL");
         }
         
@@ -300,13 +393,13 @@ app.get("/verify-otp", async (req, res) => {
         
         console.log(`✅ تحقق ناجح! الكود صحيح`);
         
-        // تنسيق الرقم كاملاً مع المفتاح
-        const fullPhone = "966" + rawPhone; // 966554526287
+        // استخدام الرقم الكامل من البيانات المخزنة أو تنسيقه
+        const userFullPhone = foundData.fullPhone || fullPhone;
         
         // تسجيل المستخدم مع اسم التطبيق الخاص به
-        await db.collection('users').doc(fullPhone + "_" + foundData.appName).set({ 
+        await db.collection('users').doc(userFullPhone + "_" + foundData.appName).set({ 
             name: foundData.name || 'مستخدم',
-            phone: fullPhone,
+            phone: userFullPhone,
             appName: foundData.appName || 'default',
             deviceId: foundData.deviceId || '',
             verifiedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -320,7 +413,7 @@ app.get("/verify-otp", async (req, res) => {
         
         // إبلاغ الإدمن
         await safeSend(normalizePhone(myNumber), { 
-            text: `🆕 مستخدم جديد: ${fullPhone}\n📱 التطبيق: ${foundData.appName}` 
+            text: `🆕 مستخدم جديد: ${userFullPhone}\n📱 التطبيق: ${foundData.appName}` 
         });
         
         console.log(`🎉 تم تسجيل المستخدم بنجاح للتطبيق ${foundData.appName}`);
