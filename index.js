@@ -399,8 +399,8 @@ async function setupTelegramWebhook() {
 
 app.get("/check-device", async (req, res) => {
     try {
-        const { id, appName, version } = req.query;
-        console.log(`🔍 فحص الجهاز: ${id} للتطبيق: ${appName} الإصدار: ${version || 'غير محدد'}`);
+        const { id, appName } = req.query;
+        console.log(`🔍 فحص الجهاز: ${id} للتطبيق: ${appName}`);
         
         const snap = await db.collection('users')
             .where("deviceId", "==", id)
@@ -408,31 +408,30 @@ app.get("/check-device", async (req, res) => {
             .get();
         
         if (!snap.empty) {
-            const userData = snap.docs[0].data();
-            const savedVersion = userData.appVersion || '1.0';
-            
-            if (version && savedVersion !== version) {
-                console.log(`📱 إصدار مختلف: المتوقع ${savedVersion}، المستلم ${version}`);
-                return res.status(409).send("VERSION_MISMATCH");
-            }
-            
+            // الجهاز موجود ومسجل مسبقاً
+            console.log(`✅ الجهاز ${id} موجود ومسجل لتطبيق ${appName}`);
             return res.status(200).send("SUCCESS");
         } else {
+            // الجهاز غير مسجل - يجب تسجيل الدخول
+            console.log(`❌ الجهاز ${id} غير مسجل لتطبيق ${appName}`);
             return res.status(404).send("NOT_FOUND");
         }
     } catch (error) {
+        console.error("خطأ في فحص الجهاز:", error);
         res.status(500).send("ERROR");
     }
 });
 
 app.get("/request-otp", async (req, res) => {
     try {
-        const { phone, name, app: appName, deviceId, version } = req.query;
+        const { phone, name, app: appName, deviceId } = req.query;
         
         console.log("=".repeat(50));
         console.log("📱 طلب كود جديد");
         console.log("=".repeat(50));
         console.log("الرقم الأصلي:", phone);
+        console.log("الجهاز:", deviceId);
+        console.log("التطبيق:", appName);
         
         const formatted = formatPhoneNumber(phone);
         console.log("الرقم بعد التنسيق:", formatted);
@@ -449,7 +448,6 @@ app.get("/request-otp", async (req, res) => {
             name: name || 'مستخدم',
             appName: appName,
             deviceId: deviceId,
-            appVersion: version || '1.0',
             originalPhone: phone,
             formattedPhone: formatted,
             timestamp: Date.now()
@@ -462,7 +460,6 @@ app.get("/request-otp", async (req, res) => {
             name: name || 'مستخدم',
             appName: appName,
             deviceId: deviceId,
-            appVersion: version || '1.0',
             originalPhone: phone,
             countryCode: formatted.countryCode,
             nationalNumber: formatted.nationalNumber,
@@ -470,7 +467,7 @@ app.get("/request-otp", async (req, res) => {
             createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         
-        console.log(`📦 تم تخزين الكود ${otp} للجهاز ${deviceId} (الإصدار: ${version || '1.0'})`);
+        console.log(`📦 تم تخزين الكود ${otp} للجهاز ${deviceId}`);
         
         const jid = formatted.fullNumber.replace('+', '') + "@s.whatsapp.net";
         await safeSend(jid, { 
@@ -531,18 +528,18 @@ app.get("/verify-otp", async (req, res) => {
                           codeData.fullNumber?.replace('+', '') || 
                           phone.replace(/\D/g, '');
         
-        const userKey = finalPhone + "_" + codeData.appName;
+        // تغيير المفتاح ليشمل deviceId مع appName
+        const userKey = codeData.deviceId + "_" + codeData.appName;
         
         await db.collection('users').doc(userKey).set({ 
             name: codeData.name,
             phone: finalPhone,
             appName: codeData.appName,
             deviceId: codeData.deviceId,
-            appVersion: codeData.appVersion || '1.0',
             verifiedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
         
-        console.log(`✅ تم تسجيل المستخدم: ${userKey} (الإصدار: ${codeData.appVersion || '1.0'})`);
+        console.log(`✅ تم تسجيل المستخدم: ${userKey} (الجهاز: ${codeData.deviceId})`);
         
         try {
             const ownerJid = getJidFromPhone(OWNER_NUMBER);
@@ -557,7 +554,7 @@ app.get("/verify-otp", async (req, res) => {
                             `📱 *رقم الهاتف:* ${finalPhone}\n` +
                             `🌍 *الدولة:* ${countryDisplay}\n` +
                             `📲 *التطبيق:* ${codeData.appName}\n` +
-                            `📱 *الإصدار:* ${codeData.appVersion || '1.0'}\n` +
+                            `📱 *معرف الجهاز:* ${codeData.deviceId}\n` +
                             `📅 *التاريخ:* ${dateStr} ${timeStr}`;
             
             await safeSend(ownerJid, { text: message });
