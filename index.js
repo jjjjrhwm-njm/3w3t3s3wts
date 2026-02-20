@@ -13,7 +13,6 @@ const pino = require("pino");
 const https = require("https");
 const path = require("path");
 const { parsePhoneNumberFromString } = require('libphonenumber-js');
-const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
@@ -22,19 +21,18 @@ let sock;
 let qrImage = ""; 
 let isStarting = false;
 
-// المالك
+// رقم المالك
 const OWNER_NUMBER = process.env.OWNER_NUMBER || "966554526287";
 
-// تيليجرام
+// متغيرات تيليجرام
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ADMIN_ID = process.env.TELEGRAM_ADMIN_ID;
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
 // التخزين المؤقت
-const pendingSessions = new Map(); // للتخزين المؤقت للجلسات
-const telegramStates = new Map(); // لحالات التيليجرام
+const pendingVerifications = new Map(); // مفتاح: deviceId_appName, قيمة: {otp, phone, name, timestamp}
 
-// --- إعداد Firebase ---
+// إعداد Firebase
 const firebaseConfig = process.env.FIREBASE_CONFIG;
 if (!admin.apps.length) {
     const serviceAccount = JSON.parse(firebaseConfig);
@@ -44,7 +42,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- النبض ---
+// النبض الحديدي
 setInterval(() => {
     const host = process.env.RENDER_EXTERNAL_HOSTNAME;
     if (host) {
@@ -54,7 +52,7 @@ setInterval(() => {
     }
 }, 10 * 60 * 1000);
 
-// دوال مساعدة
+// دالة الإرسال الآمن
 async function safeSend(jid, content) {
     try {
         if (sock && sock.user) {
@@ -63,6 +61,7 @@ async function safeSend(jid, content) {
     } catch (e) { console.log("⚠️ فشل الإرسال"); }
 }
 
+// دالة إرسال تيليجرام
 async function sendTelegram(chatId, text) {
     try {
         await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
@@ -77,89 +76,78 @@ async function sendTelegram(chatId, text) {
     } catch (e) { console.log("⚠️ فشل إرسال تيليجرام"); }
 }
 
-// دالة تنسيق الأرقام (محسنة)
+// دالة ذكية لتنسيق الأرقام (محسنة)
 function formatPhoneNumber(phone) {
     let cleaned = phone.replace(/\D/g, '');
+    
     if (!cleaned || cleaned.length < 7) {
-        return { isValid: false, fullNumber: null };
+        return { isValid: false };
     }
 
-    const countryCodes = [
-        { code: '966', name: '🇸🇦 السعودية', length: 9, startsWith: ['5'] },
-        { code: '20', name: '🇪🇬 مصر', length: 10, startsWith: ['1', '2'] },
-        { code: '974', name: '🇶🇦 قطر', length: 8, startsWith: ['3', '4', '5', '6', '7'] },
-        { code: '973', name: '🇧🇭 البحرين', length: 8, startsWith: ['3'] },
-        { code: '968', name: '🇴🇲 عمان', length: 8, startsWith: ['2', '9'] },
-        { code: '965', name: '🇰🇼 الكويت', length: 8, startsWith: ['5', '6', '9'] },
-        { code: '971', name: '🇦🇪 الإمارات', length: 9, startsWith: ['5'] },
-        { code: '967', name: '🇾🇪 اليمن', length: 9, startsWith: ['7'] },
-        { code: '962', name: '🇯🇴 الأردن', length: 9, startsWith: ['7'] },
-        { code: '964', name: '🇮🇶 العراق', length: 10, startsWith: ['7'] },
-        { code: '963', name: '🇸🇾 سوريا', length: 9, startsWith: ['9'] },
-        { code: '961', name: '🇱🇧 لبنان', length: 8, startsWith: ['3', '7'] },
-        { code: '213', name: '🇩🇿 الجزائر', length: 9, startsWith: ['5', '6', '7'] },
-        { code: '212', name: '🇲🇦 المغرب', length: 9, startsWith: ['6', '7'] },
-        { code: '216', name: '🇹🇳 تونس', length: 8, startsWith: ['2', '5', '9'] },
-        { code: '218', name: '🇱🇾 ليبيا', length: 9, startsWith: ['9'] },
-        { code: '222', name: '🇲🇷 موريتانيا', length: 8, startsWith: ['2'] },
-        { code: '249', name: '🇸🇩 السودان', length: 9, startsWith: ['9'] },
-        { code: '92', name: '🇵🇰 باكستان', length: 10, startsWith: ['3'] },
-        { code: '93', name: '🇦🇫 أفغانستان', length: 9, startsWith: ['7'] },
-        { code: '98', name: '🇮🇷 إيران', length: 10, startsWith: ['9'] },
-        { code: '90', name: '🇹🇷 تركيا', length: 10, startsWith: ['5'] },
-        { code: '91', name: '🇮🇳 الهند', length: 10, startsWith: ['6', '7', '8', '9'] },
-        { code: '880', name: '🇧🇩 بنجلاديش', length: 10, startsWith: ['1'] },
-        { code: '60', name: '🇲🇾 ماليزيا', length: 9, startsWith: ['1'] },
-        { code: '62', name: '🇮🇩 إندونيسيا', length: 10, startsWith: ['8'] }
-    ];
-
+    // محاولة باستخدام المكتبة
     try {
         const phoneNumber = parsePhoneNumberFromString(phone);
         if (phoneNumber && phoneNumber.isValid()) {
-            const country = countryCodes.find(c => c.code == phoneNumber.countryCallingCode);
             return {
                 nationalNumber: phoneNumber.nationalNumber,
                 countryCode: phoneNumber.countryCallingCode,
                 fullNumber: phoneNumber.number,
-                isValid: true,
-                countryName: country?.name || '🌍 أخرى'
+                isValid: true
             };
         }
     } catch (e) {}
 
-    let numberToAnalyze = cleaned.startsWith('0') ? cleaned.substring(1) : cleaned;
-    
+    // تحليل يدوي للمفاتيح الشائعة
+    const countryCodes = [
+        { code: '966', length: 9 }, // السعودية
+        { code: '20', length: 10 }, // مصر
+        { code: '971', length: 9 }, // الإمارات
+        { code: '965', length: 8 }, // الكويت
+        { code: '974', length: 8 }, // قطر
+        { code: '973', length: 8 }, // البحرين
+        { code: '968', length: 8 }, // عمان
+        { code: '962', length: 9 }, // الأردن
+        { code: '964', length: 10 }, // العراق
+        { code: '963', length: 9 }, // سوريا
+        { code: '961', length: 8 }, // لبنان
+        { code: '967', length: 9 }, // اليمن
+        { code: '213', length: 9 }, // الجزائر
+        { code: '212', length: 9 }, // المغرب
+        { code: '216', length: 8 }, // تونس
+        { code: '218', length: 9 }, // ليبيا
+        { code: '249', length: 9 }, // السودان
+        { code: '92', length: 10 }, // باكستان
+        { code: '93', length: 9 }, // أفغانستان
+        { code: '98', length: 10 }, // إيران
+        { code: '90', length: 10 }, // تركيا
+        { code: '91', length: 10 }, // الهند
+        { code: '880', length: 10 }, // بنجلاديش
+    ];
+
+    // البحث عن مفتاح الدولة
     for (const country of countryCodes) {
-        if (numberToAnalyze.startsWith(country.code)) {
-            const nationalPart = numberToAnalyze.substring(country.code.length);
+        if (cleaned.startsWith(country.code)) {
+            const nationalPart = cleaned.substring(country.code.length);
             if (nationalPart.length === country.length) {
                 return {
                     nationalNumber: nationalPart,
                     countryCode: country.code,
                     fullNumber: `+${country.code}${nationalPart}`,
-                    isValid: true,
-                    countryName: country.name
+                    isValid: true
                 };
             }
         }
     }
 
-    return {
-        nationalNumber: numberToAnalyze,
-        countryCode: '966',
-        fullNumber: `+966${numberToAnalyze}`,
-        isValid: true,
-        countryName: '🇸🇦 السعودية (تقديري)'
-    };
+    return { isValid: false };
 }
 
-// دالة تشفير لإنشاء معرف جلسة فريد
-function generateSessionToken(deviceId, appName, phone) {
-    const data = `${deviceId}:${appName}:${phone}:${Date.now()}`;
-    return crypto.createHash('sha256').update(data).digest('hex').substring(0, 16);
+function getJidFromPhone(phone) {
+    const formatted = formatPhoneNumber(phone);
+    return formatted.fullNumber.replace('+', '') + "@s.whatsapp.net";
 }
 
-// --- استعادة وحفظ الهوية (بدون تغيير) ---
+// استعادة الهوية
 async function restoreIdentity() {
     try {
         const authDir = './auth_info_stable';
@@ -194,7 +182,7 @@ async function saveIdentity() {
     }
 }
 
-// --- تشغيل البوت ---
+// تشغيل البوت
 async function startBot() {
     if (isStarting) return;
     isStarting = true;
@@ -228,12 +216,6 @@ async function startBot() {
             qrImage = "DONE";
             isStarting = false;
             console.log("🚀 البوت متصل");
-            
-            // إرسال رسالة للمالك بأن البوت جاهز
-            try {
-                const ownerJid = OWNER_NUMBER.replace('+', '') + "@s.whatsapp.net";
-                await safeSend(ownerJid, { text: "✅ *البوت جاهز للعمل*" });
-            } catch(e) {}
         }
         if (connection === 'close') {
             isStarting = false;
@@ -245,490 +227,44 @@ async function startBot() {
     });
 }
 
-// --- API محسن ---
-// 1. التحقق من الجهاز (الآن مع التحقق من التطبيق والجهاز معاً)
-app.get("/check-device", async (req, res) => {
+// دالة النشر عبر الواتساب
+async function publishToWhatsApp(appName, link, description, chatId) {
     try {
-        const { deviceId, appName, version } = req.query;
-        
-        if (!deviceId || !appName) {
-            return res.status(400).send("MISSING_PARAMS");
+        let query = db.collection('users');
+        if (appName !== "الجميع") {
+            query = query.where("appName", "==", appName);
         }
         
-        console.log(`🔍 فحص: جهاز=${deviceId}, تطبيق=${appName}, إصدار=${version || 'غير محدد'}`);
+        const usersSnapshot = await query.get();
+        const targets = usersSnapshot.docs;
         
-        // البحث عن المستخدم بمعرف الجهاز واسم التطبيق معاً
-        const userSnapshot = await db.collection('users')
-            .where("deviceId", "==", deviceId)
-            .where("appName", "==", appName)
-            .get();
+        await sendTelegram(chatId, `🚀 جاري النشر لـ ${targets.length} مستخدم ${appName !== "الجميع" ? `من تطبيق ${appName}` : ''}...`);
         
-        if (!userSnapshot.empty) {
-            const userData = userSnapshot.docs[0].data();
-            
-            // التحقق من الإصدار إذا تم إرساله
-            if (version && userData.appVersion && userData.appVersion !== version) {
-                console.log(`📱 إصدار مختلف: المتوقع ${userData.appVersion}، المستلم ${version}`);
-                return res.status(409).send("VERSION_MISMATCH");
-            }
-            
-            // إنشاء رمز جلسة
-            const sessionToken = generateSessionToken(deviceId, appName, userData.phone);
-            
-            return res.status(200).json({
-                status: "AUTHORIZED",
-                sessionToken: sessionToken,
-                userData: {
-                    name: userData.name,
-                    phone: userData.phone,
-                    appVersion: userData.appVersion
-                }
-            });
-        } else {
-            return res.status(404).send("UNAUTHORIZED");
-        }
-    } catch (error) {
-        console.error("❌ خطأ في check-device:", error);
-        res.status(500).send("ERROR");
-    }
-});
-
-// 2. طلب كود (محسن)
-app.get("/request-otp", async (req, res) => {
-    try {
-        const { phone, name, appName, deviceId, version } = req.query;
+        let successCount = 0;
+        let failCount = 0;
         
-        if (!phone || !appName || !deviceId) {
-            return res.status(400).send("MISSING_PARAMS");
-        }
-        
-        console.log("=".repeat(50));
-        console.log("📱 طلب كود جديد");
-        console.log("=".repeat(50));
-        
-        const formatted = formatPhoneNumber(phone);
-        
-        if (!formatted.isValid || !formatted.fullNumber) {
-            return res.status(400).send("INVALID_NUMBER");
-        }
-        
-        // التحقق مما إذا كان الجهاز مسجلاً مسبقاً لهذا التطبيق
-        const existingUser = await db.collection('users')
-            .where("deviceId", "==", deviceId)
-            .where("appName", "==", appName)
-            .get();
-        
-        if (!existingUser.empty) {
-            // الجهاز مسجل مسبقاً، نعيد توجيهه للتحقق المباشر
-            return res.status(200).send("ALREADY_REGISTERED");
-        }
-        
-        // إنشاء كود عشوائي من 6 أرقام
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        // إنشاء معرف جلسة فريد
-        const sessionId = generateSessionToken(deviceId, appName, formatted.fullNumber);
-        
-        const sessionData = {
-            sessionId: sessionId,
-            otp: otp,
-            name: name || 'مستخدم',
-            appName: appName,
-            deviceId: deviceId,
-            appVersion: version || '1.0',
-            formattedPhone: formatted,
-            timestamp: Date.now(),
-            attempts: 0
-        };
-        
-        // تخزين في الذاكرة وفي Firebase
-        pendingSessions.set(sessionId, sessionData);
-        
-        await db.collection('pending_sessions').doc(sessionId).set({
-            ...sessionData,
-            formattedPhone: admin.firestore.FieldValue.delete(), // لا نخزن الكائن بالكامل
-            countryCode: formatted.countryCode,
-            nationalNumber: formatted.nationalNumber,
-            fullNumber: formatted.fullNumber,
-            countryName: formatted.countryName,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        
-        // إرسال الكود عبر الواتساب
-        const jid = formatted.fullNumber.replace('+', '') + "@s.whatsapp.net";
-        await safeSend(jid, { 
-            text: `🔐 *مرحباً ${name || 'مستخدم'}*\n\n` +
-                  `كود تفعيل تطبيق *${appName}* هو:\n` +
-                  `*${otp}*\n\n` +
-                  `⏰ الكود صالح لمدة 10 دقائق`
-        });
-        
-        console.log(`✅ تم إرسال الكود ${otp} للجهاز ${deviceId}`);
-        
-        res.status(200).json({
-            status: "OK",
-            sessionId: sessionId,
-            expiresIn: 600 // 10 دقائق بالثواني
-        });
-        
-    } catch (error) {
-        console.error("❌ خطأ في request-otp:", error);
-        res.status(500).send("ERROR");
-    }
-});
-
-// 3. التحقق من الكود (محسن)
-app.get("/verify-otp", async (req, res) => {
-    try {
-        const { sessionId, otp } = req.query;
-        
-        if (!sessionId || !otp) {
-            return res.status(400).send("MISSING_PARAMS");
-        }
-        
-        // البحث في الذاكرة أولاً
-        let sessionData = pendingSessions.get(sessionId);
-        let source = "memory";
-        
-        if (!sessionData) {
-            const fbDoc = await db.collection('pending_sessions').doc(sessionId).get();
-            if (fbDoc.exists) {
-                sessionData = fbDoc.data();
-                source = "firebase";
-            }
-        }
-        
-        if (!sessionData) {
-            return res.status(401).send("INVALID_SESSION");
-        }
-        
-        // التحقق من الصلاحية الزمنية
-        const timestamp = sessionData.timestamp || (sessionData.createdAt?.toDate?.()?.getTime() || 0);
-        const now = Date.now();
-        const diffMinutes = (now - timestamp) / (1000 * 60);
-        
-        if (diffMinutes > 10) {
-            pendingSessions.delete(sessionId);
-            await db.collection('pending_sessions').doc(sessionId).delete();
-            return res.status(401).send("EXPIRED");
-        }
-        
-        // التحقق من عدد المحاولات
-        sessionData.attempts = (sessionData.attempts || 0) + 1;
-        if (sessionData.attempts > 5) {
-            pendingSessions.delete(sessionId);
-            await db.collection('pending_sessions').doc(sessionId).delete();
-            return res.status(401).send("TOO_MANY_ATTEMPTS");
-        }
-        
-        // تحديث في الذاكرة
-        pendingSessions.set(sessionId, sessionData);
-        
-        // التحقق من صحة الكود
-        if (sessionData.otp !== otp) {
-            return res.status(401).send("INVALID_CODE");
-        }
-        
-        // نجاح التحقق - تسجيل المستخدم
-        const phone = sessionData.fullNumber || 
-                     (sessionData.formattedPhone?.fullNumber) || 
-                     `+${sessionData.countryCode}${sessionData.nationalNumber}`;
-        
-        const cleanPhone = phone.replace('+', '');
-        const userKey = `${cleanPhone}_${sessionData.appName}`;
-        
-        await db.collection('users').doc(userKey).set({ 
-            name: sessionData.name,
-            phone: cleanPhone,
-            appName: sessionData.appName,
-            deviceId: sessionData.deviceId,
-            appVersion: sessionData.appVersion || '1.0',
-            verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastActive: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        
-        // إنشاء رمز جلسة نهائي
-        const finalToken = generateSessionToken(sessionData.deviceId, sessionData.appName, cleanPhone);
-        
-        // إشعار المالك
-        try {
-            const ownerJid = OWNER_NUMBER.replace('+', '') + "@s.whatsapp.net";
-            const countryDisplay = sessionData.countryName || '🌍 أخرى';
-            
-            const message = `🆕 *مستخدم جديد*\n\n` +
-                            `👤 *الاسم:* ${sessionData.name}\n` +
-                            `📱 *الرقم:* ${cleanPhone}\n` +
-                            `🌍 *الدولة:* ${countryDisplay}\n` +
-                            `📲 *التطبيق:* ${sessionData.appName}\n` +
-                            `📱 *الإصدار:* ${sessionData.appVersion || '1.0'}\n` +
-                            `🆔 *الجهاز:* ${sessionData.deviceId.substring(0, 8)}...`;
-            
-            await safeSend(ownerJid, { text: message });
-        } catch (e) {}
-        
-        // تنظيف البيانات المؤقتة
-        pendingSessions.delete(sessionId);
-        await db.collection('pending_sessions').doc(sessionId).delete();
-        
-        res.status(200).json({
-            status: "SUCCESS",
-            sessionToken: finalToken,
-            userData: {
-                name: sessionData.name,
-                phone: cleanPhone,
-                appName: sessionData.appName
-            }
-        });
-        
-    } catch (error) {
-        console.error("❌ خطأ في verify-otp:", error);
-        res.status(500).send("ERROR");
-    }
-});
-
-// 4. إعادة التحقق (للأجهزة المسجلة مسبقاً)
-app.get("/reverify", async (req, res) => {
-    try {
-        const { deviceId, appName, sessionToken } = req.query;
-        
-        if (!deviceId || !appName || !sessionToken) {
-            return res.status(400).send("MISSING_PARAMS");
-        }
-        
-        // البحث عن المستخدم
-        const userSnapshot = await db.collection('users')
-            .where("deviceId", "==", deviceId)
-            .where("appName", "==", appName)
-            .get();
-        
-        if (userSnapshot.empty) {
-            return res.status(404).send("NOT_FOUND");
-        }
-        
-        const userData = userSnapshot.docs[0].data();
-        
-        // التحقق من صحة التوكن (في الإنتاج استخدم JWT)
-        const expectedToken = generateSessionToken(deviceId, appName, userData.phone);
-        if (sessionToken !== expectedToken) {
-            return res.status(401).send("INVALID_TOKEN");
-        }
-        
-        // تحديث آخر نشاط
-        await userSnapshot.docs[0].ref.update({
-            lastActive: admin.firestore.FieldValue.serverTimestamp()
-        });
-        
-        res.status(200).json({
-            status: "AUTHORIZED",
-            userData: {
-                name: userData.name,
-                phone: userData.phone,
-                appName: userData.appName,
-                appVersion: userData.appVersion
-            }
-        });
-        
-    } catch (error) {
-        console.error("❌ خطأ في reverify:", error);
-        res.status(500).send("ERROR");
-    }
-});
-
-// --- Webhook تيليجرام (محسن) ---
-app.post("/telegram-webhook", async (req, res) => {
-    try {
-        const message = req.body.message;
-        if (!message) return res.sendStatus(200);
-        
-        const chatId = message.chat.id;
-        const text = message.text;
-        const userId = message.from.id;
-        
-        // التحقق من الصلاحية
-        if (userId.toString() !== TELEGRAM_ADMIN_ID) {
-            await sendTelegram(chatId, "⛔ أنت غير مصرح باستخدام هذا البوت.");
-            return res.sendStatus(200);
-        }
-        
-        const currentState = telegramStates.get(chatId);
-        
-        // معالجة الحالات النشطة
-        if (currentState) {
-            if (text === "❌ إلغاء") {
-                telegramStates.delete(chatId);
-                await sendTelegram(chatId, "✅ تم إلغاء العملية.");
-                return res.sendStatus(200);
-            }
-            
-            if (currentState.command === "نشر") {
-                // خطوات النشر...
-                if (currentState.step === "waiting_link") {
-                    if (!text.startsWith('http')) {
-                        await sendTelegram(chatId, "❌ رابط غير صحيح. أرسل رابطاً يبدأ بـ http");
-                        return res.sendStatus(200);
-                    }
-                    currentState.link = text;
-                    currentState.step = "waiting_desc";
-                    telegramStates.set(chatId, currentState);
-                    await sendTelegram(chatId, "✅ تم استلام الرابط.\nالآن أرسل *الوصف*:");
-                    return res.sendStatus(200);
-                }
-                
-                if (currentState.step === "waiting_desc") {
-                    currentState.desc = text;
-                    currentState.step = "waiting_target";
-                    telegramStates.set(chatId, currentState);
-                    
-                    const usersSnapshot = await db.collection('users').get();
-                    const appStats = {};
-                    usersSnapshot.docs.forEach(doc => {
-                        const app = doc.data().appName;
-                        if (app) appStats[app] = (appStats[app] || 0) + 1;
-                    });
-                    
-                    let menu = "🎯 *اختر التطبيق:*\n\n";
-                    menu += "0️⃣ - 🌐 *الجميع*\n\n";
-                    
-                    const apps = Object.keys(appStats);
-                    apps.forEach((app, index) => {
-                        menu += `${index+1}️⃣ - 📱 *${app}* (${appStats[app]} مستخدم)\n`;
-                    });
-                    menu += "\n📌 أرسل الرقم المطلوب";
-                    
-                    await sendTelegram(chatId, menu);
-                    return res.sendStatus(200);
-                }
-                
-                if (currentState.step === "waiting_target") {
-                    const usersSnapshot = await db.collection('users').get();
-                    const apps = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(Boolean);
-                    
-                    let selectedApp = "";
-                    
-                    if (text === "0") {
-                        selectedApp = "الجميع";
-                    } else {
-                        const idx = parseInt(text) - 1;
-                        if (isNaN(idx) || idx < 0 || idx >= apps.length) {
-                            await sendTelegram(chatId, "❌ رقم غير صحيح");
-                            return res.sendStatus(200);
-                        }
-                        selectedApp = apps[idx];
-                    }
-                    
-                    telegramStates.delete(chatId);
-                    
-                    // بدء النشر
-                    await sendTelegram(chatId, `🚀 جاري النشر لتطبيق *${selectedApp}*...`);
-                    
-                    const targets = selectedApp === "الجميع" 
-                        ? usersSnapshot.docs
-                        : usersSnapshot.docs.filter(d => d.data().appName === selectedApp);
-                    
-                    let success = 0, fail = 0;
-                    
-                    for (const doc of targets) {
-                        try {
-                            const userPhone = doc.data().phone;
-                            await safeSend(userPhone + "@s.whatsapp.net", { 
-                                text: `📢 *تحديث جديد*\n\n${currentState.desc}\n\n🔗 [اضغط هنا](${currentState.link})` 
-                            });
-                            success++;
-                            await new Promise(r => setTimeout(r, 300));
-                        } catch (e) {
-                            fail++;
-                        }
-                    }
-                    
-                    await sendTelegram(chatId, 
-                        `✅ *تم النشر*\n\n` +
-                        `✓ نجح: ${success}\n` +
-                        `✗ فشل: ${fail}\n` +
-                        `👥 المجموع: ${targets.length}`
-                    );
-                    
-                    return res.sendStatus(200);
-                }
-            }
-            return res.sendStatus(200);
-        }
-        
-        // الأوامر الرئيسية
-        if (text === "/start") {
-            await sendTelegram(chatId, 
-                `🌟 *مرحباً بك في لوحة التحكم*\n\n` +
-                `📋 *الأوامر المتاحة:*\n\n` +
-                `📢 *نشر* - نشر إعلان جديد\n` +
-                `📊 *إحصائيات* - عرض الإحصائيات\n` +
-                `ℹ️ *حالة* - حالة البوت\n` +
-                `📱 *الأجهزة* - عرض الأجهزة النشطة`
-            );
-        }
-        else if (text === "نشر") {
-            telegramStates.set(chatId, { command: "نشر", step: "waiting_link" });
-            await sendTelegram(chatId, 
-                "🔗 *الخطوة 1/3*\n\n" +
-                "أرسل الرابط الذي تريد نشره:"
-            );
-        }
-        else if (text === "إحصائيات") {
-            const usersSnap = await db.collection('users').get();
-            const stats = {};
-            
-            usersSnap.docs.forEach(doc => {
-                const app = doc.data().appName || 'غير معروف';
-                stats[app] = (stats[app] || 0) + 1;
-            });
-            
-            let report = "📊 *الإحصائيات*\n\n";
-            report += `👥 *الإجمالي:* ${usersSnap.size}\n\n`;
-            report += "📱 *حسب التطبيق:*\n";
-            
-            Object.entries(stats)
-                .sort((a, b) => b[1] - a[1])
-                .forEach(([app, count]) => {
-                    report += `• ${app}: ${count}\n`;
+        for (const d of targets) {
+            try {
+                const userPhone = d.data().phone;
+                await safeSend(getJidFromPhone(userPhone), { 
+                    text: `📢 *تحديث جديد!*\n\n${description}\n\n🔗 ${link}` 
                 });
-            
-            await sendTelegram(chatId, report);
-        }
-        else if (text === "حالة") {
-            const usersCount = (await db.collection('users').get()).size;
-            const pendingCount = (await db.collection('pending_sessions').get()).size;
-            
-            await sendTelegram(chatId,
-                `⚡ *حالة النظام*\n\n` +
-                `✅ البوت: نشط\n` +
-                `👥 المستخدمين: ${usersCount}\n` +
-                `⏳ في الانتظار: ${pendingCount}\n` +
-                `📱 الواتساب: ${sock?.user ? '🟢 متصل' : '🔴 غير متصل'}`
-            );
-        }
-        else if (text === "الأجهزة") {
-            const usersSnap = await db.collection('users')
-                .orderBy('lastActive', 'desc')
-                .limit(10)
-                .get();
-            
-            let report = "📱 *آخر الأجهزة النشطة*\n\n";
-            usersSnap.docs.forEach((doc, i) => {
-                const data = doc.data();
-                report += `${i+1}. ${data.name || 'بدون اسم'}\n`;
-                report += `   📱 ${data.appName} | ${data.phone.substring(0, 7)}...\n`;
-                report += `   🕐 ${data.lastActive?.toDate?.()?.toLocaleString('ar-EG') || 'غير معروف'}\n\n`;
-            });
-            
-            await sendTelegram(chatId, report);
+                successCount++;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (e) {
+                failCount++;
+            }
         }
         
-        res.sendStatus(200);
+        const report = `✅ *تم النشر بنجاح!*\n\n📊 *الإحصائيات:*\n✓ تم الإرسال: ${successCount}\n✗ فشل: ${failCount}\n👥 المجموع: ${targets.length}`;
+        await sendTelegram(chatId, report);
+        
     } catch (error) {
-        console.error("❌ خطأ تيليجرام:", error);
-        res.sendStatus(200);
+        await sendTelegram(chatId, `❌ خطأ في النشر: ${error.message}`);
     }
-});
+}
 
-// --- إعداد Webhook تيليجرام ---
+// إعداد Webhook تيليجرام
 async function setupTelegramWebhook() {
     if (!TELEGRAM_BOT_TOKEN) return;
     
@@ -739,54 +275,302 @@ async function setupTelegramWebhook() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: webhookUrl })
         });
-        console.log("✅ Webhook تيليجرام جاهز");
+        console.log("✅ Webhook تيليجرام تم إعداده");
     } catch (error) {
-        console.log("⚠️ فشل إعداد webhook");
+        console.log("⚠️ فشل إعداد webhook:", error.message);
     }
 }
 
-// --- مسارات عامة ---
-app.get("/ping", (req, res) => res.send("💓"));
-app.get("/", (req, res) => {
-    if (qrImage === "DONE") {
-        res.send(`
-            <html>
-                <head><style>body{font-family:Arial;text-align:center;padding:50px;background:#f0f0f0}</style></head>
-                <body>
-                    <h1 style="color:#25D366">✅ البوت يعمل</h1>
-                    <p>تم الاتصال بنجاح</p>
-                </body>
-            </html>
-        `);
-    } else if (qrImage) {
-        res.send(`
-            <html>
-                <head><style>body{font-family:Arial;text-align:center;padding:20px;background:#f0f0f0}</style></head>
-                <body>
-                    <h1 style="color:#25D366">🔐 مسح QR</h1>
-                    <img src="${qrImage}" style="max-width:300px;border:10px solid white;border-radius:20px;box-shadow:0 0 20px rgba(0,0,0,0.2)">
-                </body>
-            </html>
-        `);
-    } else {
-        res.send(`
-            <html>
-                <head><style>body{font-family:Arial;text-align:center;padding:50px;background:#f0f0f0}</style></head>
-                <body>
-                    <h1 style="color:#25D366">⏳ جاري التحميل...</h1>
-                </body>
-            </html>
-        `);
+// ============================================
+// API المتقدم - نقطة واحدة للتحقق
+// ============================================
+
+app.get("/api", async (req, res) => {
+    try {
+        const { action, phone, name, deviceId, appName, appVersion, code } = req.query;
+        
+        console.log("=".repeat(50));
+        console.log(`📱 طلب: ${action}`, { phone, name, deviceId, appName, appVersion, code });
+        console.log("=".repeat(50));
+        
+        // نقطة التحقق من الجهاز
+        if (action === "check") {
+            if (!deviceId || !appName) {
+                return res.status(400).send("MISSING_PARAMS");
+            }
+            
+            // البحث عن المستخدم بهذا الجهاز والتطبيق
+            const userSnapshot = await db.collection('users')
+                .where("deviceId", "==", deviceId)
+                .where("appName", "==", appName)
+                .get();
+            
+            if (!userSnapshot.empty) {
+                const userData = userSnapshot.docs[0].data();
+                const savedVersion = userData.appVersion || '1.0';
+                
+                // التحقق من الإصدار
+                if (appVersion && savedVersion !== appVersion) {
+                    return res.status(409).send("VERSION_MISMATCH");
+                }
+                
+                return res.status(200).send("VERIFIED");
+            } else {
+                return res.status(404).send("NOT_FOUND");
+            }
+        }
+        
+        // نقطة طلب كود التفعيل
+        else if (action === "request") {
+            if (!phone || !name || !deviceId || !appName) {
+                return res.status(400).send("MISSING_PARAMS");
+            }
+            
+            const formatted = formatPhoneNumber(phone);
+            if (!formatted.isValid || !formatted.fullNumber) {
+                return res.status(400).send("INVALID_NUMBER");
+            }
+            
+            // التحقق من عدم وجود الجهاز مسجل بالفعل
+            const existingUser = await db.collection('users')
+                .where("deviceId", "==", deviceId)
+                .where("appName", "==", appName)
+                .get();
+            
+            if (!existingUser.empty) {
+                return res.status(409).send("ALREADY_REGISTERED");
+            }
+            
+            // إنشاء كود عشوائي
+            const otp = Math.floor(100000 + Math.random() * 900000).toString();
+            const key = `${deviceId}_${appName}`;
+            
+            // تخزين مؤقت
+            pendingVerifications.set(key, {
+                otp,
+                phone: formatted.fullNumber,
+                name,
+                appVersion: appVersion || '1.0',
+                timestamp: Date.now()
+            });
+            
+            // تخزين في Firebase كنسخة احتياطية
+            await db.collection('pending_codes').doc(key).set({
+                otp,
+                phone: formatted.fullNumber,
+                name,
+                appName,
+                deviceId,
+                appVersion: appVersion || '1.0',
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+            // إرسال الكود عبر الواتساب
+            const jid = formatted.fullNumber.replace('+', '') + "@s.whatsapp.net";
+            await safeSend(jid, { 
+                text: `🔐 مرحباً ${name}، كود تفعيل تطبيق ${appName} هو: *${otp}*` 
+            });
+            
+            console.log(`✅ تم إرسال الكود ${otp} للرقم ${formatted.fullNumber}`);
+            return res.status(200).send("OTP_SENT");
+        }
+        
+        // نقطة التحقق من الكود
+        else if (action === "verify") {
+            if (!code || !deviceId || !appName || !phone) {
+                return res.status(400).send("MISSING_PARAMS");
+            }
+            
+            const key = `${deviceId}_${appName}`;
+            
+            // البحث في الذاكرة أولاً
+            let verification = pendingVerifications.get(key);
+            let source = "memory";
+            
+            // إذا لم يوجد، ابحث في Firebase
+            if (!verification) {
+                const fbDoc = await db.collection('pending_codes').doc(key).get();
+                if (fbDoc.exists) {
+                    verification = fbDoc.data();
+                    source = "firebase";
+                }
+            }
+            
+            if (!verification) {
+                return res.status(404).send("NOT_FOUND");
+            }
+            
+            // التحقق من صلاحية الكود (10 دقائق)
+            const timestamp = verification.timestamp || (verification.createdAt?.toDate?.()?.getTime() || 0);
+            const now = Date.now();
+            const diffMinutes = (now - timestamp) / (1000 * 60);
+            
+            if (diffMinutes > 10) {
+                pendingVerifications.delete(key);
+                await db.collection('pending_codes').doc(key).delete();
+                return res.status(401).send("EXPIRED");
+            }
+            
+            // التحقق من تطابق الكود
+            if (verification.otp !== code) {
+                return res.status(401).send("INVALID_CODE");
+            }
+            
+            // التحقق من تطابق رقم الهاتف
+            const formatted = formatPhoneNumber(phone);
+            if (verification.phone !== formatted.fullNumber) {
+                return res.status(401).send("PHONE_MISMATCH");
+            }
+            
+            // تسجيل المستخدم
+            const userKey = `${deviceId}_${appName}`;
+            await db.collection('users').doc(userKey).set({
+                name: verification.name,
+                phone: verification.phone,
+                appName,
+                deviceId,
+                appVersion: verification.appVersion,
+                verifiedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+            // إرسال إشعار للمالك
+            try {
+                const ownerJid = getJidFromPhone(OWNER_NUMBER);
+                const now = new Date();
+                const dateStr = now.toLocaleDateString('ar-EG');
+                const timeStr = now.toLocaleTimeString('ar-EG');
+                
+                const message = `🆕 *مستخدم جديد!*\n\n` +
+                                `👤 *الاسم:* ${verification.name}\n` +
+                                `📱 *الرقم:* ${verification.phone}\n` +
+                                `📲 *التطبيق:* ${appName}\n` +
+                                `📱 *الإصدار:* ${verification.appVersion}\n` +
+                                `📅 *التاريخ:* ${dateStr} ${timeStr}`;
+                
+                await safeSend(ownerJid, { text: message });
+            } catch (e) {}
+            
+            // تنظيف البيانات المؤقتة
+            pendingVerifications.delete(key);
+            await db.collection('pending_codes').doc(key).delete();
+            
+            return res.status(200).send("SUCCESS");
+        }
+        
+        else {
+            return res.status(400).send("INVALID_ACTION");
+        }
+        
+    } catch (error) {
+        console.error("❌ خطأ:", error);
+        res.status(500).send("ERROR");
     }
 });
 
-// --- تشغيل السيرفر ---
+// ============================================
+// Webhook تيليجرام للتحكم
+// ============================================
+
+app.post("/telegram-webhook", async (req, res) => {
+    try {
+        const message = req.body.message;
+        if (!message) return res.sendStatus(200);
+        
+        const chatId = message.chat.id;
+        const text = message.text;
+        const userId = message.from.id;
+        
+        if (userId.toString() !== TELEGRAM_ADMIN_ID) {
+            await sendTelegram(chatId, "⛔ أنت غير مصرح!");
+            return res.sendStatus(200);
+        }
+        
+        // أوامر بسيطة
+        if (text === "/start") {
+            const menu = `🌟 *بوت التحكم*\n\n` +
+                        `الأوامر:\n` +
+                        `📊 /stats - الإحصائيات\n` +
+                        `📢 /publish - نشر رسالة\n` +
+                        `🔍 /apps - قائمة التطبيقات\n` +
+                        `💓 /ping - حالة البوت`;
+            
+            await sendTelegram(chatId, menu);
+        }
+        
+        else if (text === "/stats" || text === "نجم احصا") {
+            const usersSnap = await db.collection('users').get();
+            const appStats = {};
+            usersSnap.docs.forEach(doc => {
+                const appName = doc.data().appName || 'غير معروف';
+                appStats[appName] = (appStats[appName] || 0) + 1;
+            });
+            
+            let statsText = "📊 *إحصائيات المستخدمين*\n\n";
+            statsText += `👥 *الإجمالي:* ${usersSnap.size}\n\n`;
+            statsText += "📱 *حسب التطبيق:*\n";
+            
+            const sortedApps = Object.entries(appStats).sort((a, b) => b[1] - a[1]);
+            for (const [app, count] of sortedApps) {
+                const percentage = ((count / usersSnap.size) * 100).toFixed(1);
+                statsText += `• *${app}*: ${count} (${percentage}%)\n`;
+            }
+            
+            await sendTelegram(chatId, statsText);
+        }
+        
+        else if (text === "/apps" || text === "نجم تطبيقات") {
+            const usersSnap = await db.collection('users').get();
+            const appNames = [...new Set(usersSnap.docs.map(d => d.data().appName))].filter(name => name);
+            
+            let appsText = "📱 *قائمة التطبيقات*\n\n";
+            appNames.forEach((app, index) => {
+                appsText += `${index + 1}. ${app}\n`;
+            });
+            
+            await sendTelegram(chatId, appsText);
+        }
+        
+        else if (text === "/ping" || text === "نجم حالة") {
+            await sendTelegram(chatId, "⚡ *البوت يعمل بشكل طبيعي* ✅");
+        }
+        
+        else if (text.startsWith("/publish") || text === "نجم نشر") {
+            // تنفيذ النشر (يمكن تطويره)
+            await sendTelegram(chatId, "🔧 هذه الخاصية قيد التطوير");
+        }
+        
+        res.sendStatus(200);
+    } catch (error) {
+        console.error("❌ خطأ في تيليجرام:", error);
+        res.sendStatus(200);
+    }
+});
+
+// ============================================
+// الصفحات العامة
+// ============================================
+
+app.get("/ping", (req, res) => res.send("💓"));
+app.get("/", (req, res) => {
+    if (qrImage === "DONE") {
+        res.send("✅ البوت يعمل");
+    } else if (qrImage) {
+        res.send(`<img src="${qrImage}">`);
+    } else {
+        res.send("⏳ جاري التحميل...");
+    }
+});
+
+// ============================================
+// تشغيل السيرفر
+// ============================================
+
 app.listen(process.env.PORT || 10000, async () => {
-    console.log("=".repeat(60));
+    console.log("=".repeat(50));
     console.log(`🚀 السيرفر يعمل على المنفذ ${process.env.PORT || 10000}`);
     console.log(`🌐 الرابط: https://threew3t3s3wts.onrender.com`);
-    console.log(`📱 المالك: ${OWNER_NUMBER}`);
-    console.log("=".repeat(60));
+    console.log(`📱 رقم المالك: ${OWNER_NUMBER}`);
+    console.log("=".repeat(50));
     
     await setupTelegramWebhook();
     startBot();
