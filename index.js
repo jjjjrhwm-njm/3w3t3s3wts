@@ -408,11 +408,9 @@ app.get("/check-device", async (req, res) => {
             .get();
         
         if (!snap.empty) {
-            // الجهاز موجود ومسجل مسبقاً
             console.log(`✅ الجهاز ${id} موجود ومسجل لتطبيق ${appName}`);
             return res.status(200).send("SUCCESS");
         } else {
-            // الجهاز غير مسجل - يجب تسجيل الدخول
             console.log(`❌ الجهاز ${id} غير مسجل لتطبيق ${appName}`);
             return res.status(404).send("NOT_FOUND");
         }
@@ -528,7 +526,8 @@ app.get("/verify-otp", async (req, res) => {
                           codeData.fullNumber?.replace('+', '') || 
                           phone.replace(/\D/g, '');
         
-        // تغيير المفتاح ليشمل deviceId مع appName
+        // ========== التعديل الأساسي هنا ==========
+        // استخدام deviceId + appName كمفتاح بدلاً من رقم الهاتف
         const userKey = codeData.deviceId + "_" + codeData.appName;
         
         await db.collection('users').doc(userKey).set({ 
@@ -540,6 +539,7 @@ app.get("/verify-otp", async (req, res) => {
         }, { merge: true });
         
         console.log(`✅ تم تسجيل المستخدم: ${userKey} (الجهاز: ${codeData.deviceId})`);
+        // ========================================
         
         try {
             const ownerJid = getJidFromPhone(OWNER_NUMBER);
