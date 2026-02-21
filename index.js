@@ -317,7 +317,45 @@ async function banDevice(deviceId, phone, reason, chatId) {
     }
 }
 
-// --- 8. إعداد Webhook تيليجرام ---
+// --- 8. دالة فك حظر جهاز أو رقم ---
+async function unbanDevice(deviceId, phone, chatId) {
+    try {
+        // البحث عن سجل الحظر وحذفه
+        const bannedSnapshot = await db.collection('banned')
+            .where('deviceId', '==', deviceId)
+            .where('phone', '==', phone)
+            .get();
+        
+        let deletedCount = 0;
+        bannedSnapshot.docs.forEach(async doc => {
+            await doc.ref.delete();
+            deletedCount++;
+        });
+        
+        // إزالة من الذاكرة المؤقتة
+        if (deviceId) bannedDevices.delete(deviceId);
+        if (phone) bannedPhones.delete(phone);
+        
+        return deletedCount > 0;
+    } catch (error) {
+        console.log("❌ فشل فك حظر الجهاز:", error);
+        return false;
+    }
+}
+
+// --- 9. دالة حذف مستخدم ---
+async function deleteUser(deviceId, appName, chatId) {
+    try {
+        const userKey = deviceId + "_" + appName;
+        await db.collection('users').doc(userKey).delete();
+        return true;
+    } catch (error) {
+        console.log("❌ فشل حذف المستخدم:", error);
+        return false;
+    }
+}
+
+// --- 10. إعداد Webhook تيليجرام ---
 async function setupTelegramWebhook() {
     if (!TELEGRAM_BOT_TOKEN) return;
     
@@ -578,7 +616,7 @@ app.get("/verify-otp", async (req, res) => {
 });
 
 // ============================================
-// Webhook تيليجرام للتحكم (مع أمر حظر)
+// Webhook تيليجرام للتحكم (مع أوامر حظر وفك حظر وحذف)
 // ============================================
 
 app.post("/telegram-webhook", async (req, res) => {
@@ -693,6 +731,56 @@ app.post("/telegram-webhook", async (req, res) => {
                 }
             }
             
+            if (currentState.command === "فك حظر") {
+                if (currentState.step === "waiting_device_id") {
+                    currentState.deviceId = text;
+                    currentState.step = "waiting_phone";
+                    telegramStates.set(chatId, currentState);
+                    await sendTelegram(chatId, "✅ تم استلام معرف الجهاز.\nالآن أرسل *رقم الهاتف* (أو أرسل *تخطي* إذا لم يكن متوفراً):");
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_phone") {
+                    currentState.phone = text === "تخطي" ? null : text;
+                    
+                    const success = await unbanDevice(currentState.deviceId, currentState.phone, chatId);
+                    
+                    if (success) {
+                        await sendTelegram(chatId, `✅ *تم فك حظر الجهاز بنجاح!*\n\n📱 معرف الجهاز: ${currentState.deviceId}\n📞 الرقم: ${currentState.phone || 'غير محدد'}`);
+                    } else {
+                        await sendTelegram(chatId, "❌ *فشل فك حظر الجهاز!* (قد لا يكون محظوراً)");
+                    }
+                    
+                    telegramStates.delete(chatId);
+                    return res.sendStatus(200);
+                }
+            }
+            
+            if (currentState.command === "حذف مستخدم") {
+                if (currentState.step === "waiting_device_id") {
+                    currentState.deviceId = text;
+                    currentState.step = "waiting_app_name";
+                    telegramStates.set(chatId, currentState);
+                    await sendTelegram(chatId, "✅ تم استلام معرف الجهاز.\nالآن أرسل *اسم التطبيق*:");
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_app_name") {
+                    currentState.appName = text;
+                    
+                    const success = await deleteUser(currentState.deviceId, currentState.appName, chatId);
+                    
+                    if (success) {
+                        await sendTelegram(chatId, `✅ *تم حذف المستخدم بنجاح!*\n\n📱 معرف الجهاز: ${currentState.deviceId}\n📲 التطبيق: ${currentState.appName}`);
+                    } else {
+                        await sendTelegram(chatId, "❌ *فشل حذف المستخدم!*");
+                    }
+                    
+                    telegramStates.delete(chatId);
+                    return res.sendStatus(200);
+                }
+            }
+            
             return res.sendStatus(200);
         }
         
@@ -745,6 +833,14 @@ app.post("/telegram-webhook", async (req, res) => {
             telegramStates.set(chatId, { command: "حظر", step: "waiting_device_id" });
             await sendTelegram(chatId, "🚫 *خطوة 1/3 - حظر جهاز*\nأرسل *معرف الجهاز (deviceId)*:");
         }
+        else if (text === "نجم فك حضر") {
+            telegramStates.set(chatId, { command: "فك حظر", step: "waiting_device_id" });
+            await sendTelegram(chatId, "✅ *خطوة 1/2 - فك حظر جهاز*\nأرسل *معرف الجهاز (deviceId)*:");
+        }
+        else if (text === "نجم حذف مستخدم") {
+            telegramStates.set(chatId, { command: "حذف مستخدم", step: "waiting_device_id" });
+            await sendTelegram(chatId, "🗑️ *خطوة 1/2 - حذف مستخدم*\nأرسل *معرف الجهاز (deviceId)*:");
+        }
         else if (text === "نجم مسح") {
             const pendingSnap = await db.collection('pending_codes').get();
             let deletedCount = 0;
@@ -768,6 +864,8 @@ app.post("/telegram-webhook", async (req, res) => {
                             `📊 *نجم احصا* - لعرض الإحصائيات\n` +
                             `⚡ *نجم حالة* - لعرض حالة البوت\n` +
                             `🚫 *نجم حضر* - لحظر جهاز أو رقم\n` +
+                            `✅ *نجم فك حضر* - لفك حظر جهاز أو رقم\n` +
+                            `🗑️ *نجم حذف مستخدم* - لحذف مستخدم من قاعدة البيانات\n` +
                             `🧹 *نجم مسح* - لتنظيف الأكواد المنتهية\n\n` +
                             `💡 يمكنك إلغاء أي عملية بكتابة *إلغاء*`;
             
