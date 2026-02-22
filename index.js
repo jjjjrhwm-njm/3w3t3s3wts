@@ -355,6 +355,21 @@ async function deleteUser(deviceId, appName, chatId) {
     }
 }
 
+// --- 9.5 دالة تحديث وقت اشتراك المستخدم ---
+async function updateUserSubscription(deviceId, appName, expiryDate) {
+    try {
+        const userKey = deviceId + "_" + appName;
+        await db.collection('users').doc(userKey).update({
+            expiryDate: expiryDate,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        return true;
+    } catch (error) {
+        console.log("❌ فشل تحديث وقت الاشتراك:", error);
+        return false;
+    }
+}
+
 // --- 10. إعداد Webhook تيليجرام ---
 async function setupTelegramWebhook() {
     if (!TELEGRAM_BOT_TOKEN) return;
@@ -566,6 +581,10 @@ app.get("/verify-otp", async (req, res) => {
         // استخدام مفتاح مركب: deviceId_appName
         const userKey = codeData.deviceId + "_" + codeData.appName;
         
+        // تاريخ انتهاء افتراضي (بعد 30 يوم)
+        const expiryDate = new Date();
+        expiryDate.setDate(expiryDate.getDate() + 30);
+        
         // تخزين المستخدم
         await db.collection('users').doc(userKey).set({ 
             name: codeData.name,
@@ -577,7 +596,9 @@ app.get("/verify-otp", async (req, res) => {
             ip: codeData.ip,
             userAgent: codeData.userAgent,
             verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastActive: admin.firestore.FieldValue.serverTimestamp()
+            lastActive: admin.firestore.FieldValue.serverTimestamp(),
+            expiryDate: expiryDate.toISOString(),
+            subscriptionDays: 30
         }, { merge: true });
         
         console.log(`✅ تم تسجيل المستخدم: ${userKey} (الإصدار: ${codeData.appVersion || '1.0'})`);
@@ -595,7 +616,8 @@ app.get("/verify-otp", async (req, res) => {
                             `📲 *التطبيق:* ${codeData.appName}\n` +
                             `📱 *الإصدار:* ${codeData.appVersion || '1.0'}\n` +
                             `🆔 *معرف الجهاز:* ${codeData.deviceId}\n` +
-                            `📅 *التاريخ:* ${dateStr} ${timeStr}`;
+                            `📅 *التاريخ:* ${dateStr} ${timeStr}\n` +
+                            `⏳ *صلاحية:* 30 يوم`;
             
             await safeSend(ownerJid, { text: message });
             console.log(`✅ تم إرسال إشعار للمالك`);
@@ -616,7 +638,7 @@ app.get("/verify-otp", async (req, res) => {
 });
 
 // ============================================
-// Webhook تيليجرام للتحكم (مع أوامر حظر وفك حظر وحذف)
+// Webhook تيليجرام للتحكم (مع أوامر محسنة)
 // ============================================
 
 app.post("/telegram-webhook", async (req, res) => {
@@ -642,6 +664,7 @@ app.post("/telegram-webhook", async (req, res) => {
                 return res.sendStatus(200);
             }
             
+            // ========== أمر نشر ==========
             if (currentState.command === "نشر") {
                 if (currentState.step === "waiting_link") {
                     if (!text.startsWith('http')) {
@@ -700,6 +723,278 @@ app.post("/telegram-webhook", async (req, res) => {
                 }
             }
             
+            // ========== أمر تحكم (جديد) ==========
+            if (currentState.command === "تحكم") {
+                if (currentState.step === "waiting_app_selection") {
+                    const usersSnapshot = await db.collection('users').get();
+                    const appNames = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(name => name);
+                    
+                    let selectedApp = "";
+                    
+                    if (text === "0") {
+                        selectedApp = "الجميع";
+                    } else {
+                        const idx = parseInt(text) - 1;
+                        if (isNaN(idx) || idx < 0 || idx >= appNames.length) {
+                            await sendTelegram(chatId, "❌ رقم غير صحيح. أرسل *إلغاء* للإلغاء.");
+                            return res.sendStatus(200);
+                        }
+                        selectedApp = appNames[idx];
+                    }
+                    
+                    currentState.selectedApp = selectedApp;
+                    currentState.step = "waiting_action_type";
+                    telegramStates.set(chatId, currentState);
+                    
+                    const actionMenu = `📱 *التطبيق المختار:* ${selectedApp}\n\n` +
+                                      `🔍 *اختر نوع الإجراء:*\n\n` +
+                                      `1️⃣ - عرض جميع المستخدمين\n` +
+                                      `2️⃣ - البحث برقم الهاتف\n\n` +
+                                      `❌ أرسل *إلغاء* للإلغاء.`;
+                    
+                    await sendTelegram(chatId, actionMenu);
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_action_type") {
+                    if (text === "1") {
+                        // عرض جميع المستخدمين
+                        const usersSnapshot = await db.collection('users').get();
+                        let filteredUsers = [];
+                        
+                        if (currentState.selectedApp === "الجميع") {
+                            filteredUsers = usersSnapshot.docs;
+                        } else {
+                            filteredUsers = usersSnapshot.docs.filter(d => d.data().appName === currentState.selectedApp);
+                        }
+                        
+                        if (filteredUsers.length === 0) {
+                            await sendTelegram(chatId, "📭 لا يوجد مستخدمين لهذا التطبيق.");
+                            telegramStates.delete(chatId);
+                            return res.sendStatus(200);
+                        }
+                        
+                        let usersList = `📋 *قائمة المستخدمين (${filteredUsers.length})*\n\n`;
+                        
+                        // ترتيب حسب تاريخ التسجيل (الأحدث أولاً)
+                        filteredUsers.sort((a, b) => {
+                            const dateA = a.data().verifiedAt?.toDate?.() || new Date(0);
+                            const dateB = b.data().verifiedAt?.toDate?.() || new Date(0);
+                            return dateB - dateA;
+                        });
+                        
+                        // نأخذ أول 20 مستخدم فقط (حتى لا تطول الرسالة)
+                        const displayUsers = filteredUsers.slice(0, 20);
+                        
+                        for (const doc of displayUsers) {
+                            const data = doc.data();
+                            const verifiedDate = data.verifiedAt?.toDate?.() || new Date(data.timestamp || 0);
+                            const dateStr = verifiedDate.toLocaleDateString('ar-EG');
+                            const timeStr = verifiedDate.toLocaleTimeString('ar-EG');
+                            
+                            usersList += `👤 *${data.name || 'غير معروف'}*\n`;
+                            usersList += `📱 ${data.phone || 'غير متوفر'}\n`;
+                            usersList += `📲 ${data.appName || 'غير معروف'}\n`;
+                            usersList += `🆔 \`${data.deviceId || 'غير معروف'}\`\n`;
+                            usersList += `📅 ${dateStr} ${timeStr}\n`;
+                            
+                            if (data.expiryDate) {
+                                const expiry = new Date(data.expiryDate);
+                                const daysLeft = Math.ceil((expiry - new Date()) / (1000 * 60 * 60 * 24));
+                                usersList += `⏳ متبقي: ${daysLeft} يوم\n`;
+                            }
+                            
+                            usersList += `➖➖➖➖➖\n`;
+                        }
+                        
+                        if (filteredUsers.length > 20) {
+                            usersList += `\n... و ${filteredUsers.length - 20} مستخدم آخر`;
+                        }
+                        
+                        usersList += `\n\n🔹 للتحكم بمستخدم معين، استخدم *نجم حضر* أو *نجم فك حضر* مع deviceId`;
+                        
+                        await sendTelegram(chatId, usersList);
+                        telegramStates.delete(chatId);
+                    }
+                    else if (text === "2") {
+                        // البحث برقم الهاتف
+                        currentState.step = "waiting_phone_search";
+                        telegramStates.set(chatId, currentState);
+                        await sendTelegram(chatId, "📞 أرسل *رقم الهاتف* للبحث:");
+                    }
+                    else {
+                        await sendTelegram(chatId, "❌ اختيار غير صحيح. أرسل 1 أو 2");
+                    }
+                    
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_phone_search") {
+                    // البحث برقم الهاتف
+                    const searchPhone = text.replace(/\D/g, '');
+                    
+                    const usersSnapshot = await db.collection('users').get();
+                    let foundUsers = [];
+                    
+                    if (currentState.selectedApp === "الجميع") {
+                        foundUsers = usersSnapshot.docs.filter(d => {
+                            const phone = d.data().phone?.replace(/\D/g, '') || '';
+                            return phone.includes(searchPhone) || d.data().originalPhone?.includes(searchPhone);
+                        });
+                    } else {
+                        foundUsers = usersSnapshot.docs.filter(d => {
+                            if (d.data().appName !== currentState.selectedApp) return false;
+                            const phone = d.data().phone?.replace(/\D/g, '') || '';
+                            return phone.includes(searchPhone) || d.data().originalPhone?.includes(searchPhone);
+                        });
+                    }
+                    
+                    if (foundUsers.length === 0) {
+                        await sendTelegram(chatId, "❌ لا يوجد مستخدم بهذا الرقم.");
+                        telegramStates.delete(chatId);
+                        return res.sendStatus(200);
+                    }
+                    
+                    if (foundUsers.length > 1) {
+                        // وجدنا أكثر من مستخدم (نفس الرقم لتطبيقات مختلفة)
+                        let usersList = `🔍 *نتائج البحث (${foundUsers.length})*\n\n`;
+                        
+                        for (let i = 0; i < foundUsers.length; i++) {
+                            const doc = foundUsers[i];
+                            const data = doc.data();
+                            const verifiedDate = data.verifiedAt?.toDate?.() || new Date(data.timestamp || 0);
+                            const dateStr = verifiedDate.toLocaleDateString('ar-EG');
+                            
+                            usersList += `${i + 1}️⃣ *${data.name || 'غير معروف'}*\n`;
+                            usersList += `📱 ${data.phone || 'غير متوفر'}\n`;
+                            usersList += `📲 ${data.appName || 'غير معروف'}\n`;
+                            usersList += `🆔 \`${data.deviceId || 'غير معروف'}\`\n`;
+                            usersList += `📅 ${dateStr}\n`;
+                            usersList += `➖➖➖➖➖\n`;
+                        }
+                        
+                        usersList += `\n🔹 للتحكم، استخدم *نجم حضر* أو *نجم فك حضر* مع deviceId المطلوب`;
+                        
+                        await sendTelegram(chatId, usersList);
+                        telegramStates.delete(chatId);
+                    } else {
+                        // مستخدم واحد فقط - نعرض تفاصيله كاملة مع قائمة التحكم
+                        const userData = foundUsers[0].data();
+                        const verifiedDate = userData.verifiedAt?.toDate?.() || new Date(userData.timestamp || 0);
+                        const expiryDate = userData.expiryDate ? new Date(userData.expiryDate) : null;
+                        const daysLeft = expiryDate ? Math.ceil((expiryDate - new Date()) / (1000 * 60 * 60 * 24)) : 'غير محدد';
+                        
+                        let userDetails = `👤 *معلومات المستخدم*\n\n`;
+                        userDetails += `📝 *الاسم:* ${userData.name || 'غير معروف'}\n`;
+                        userDetails += `📱 *رقم الهاتف:* ${userData.phone || 'غير متوفر'}\n`;
+                        userDetails += `📲 *التطبيق:* ${userData.appName || 'غير معروف'}\n`;
+                        userDetails += `🆔 *معرف الجهاز:* \`${userData.deviceId || 'غير معروف'}\`\n`;
+                        userDetails += `📱 *الإصدار:* ${userData.appVersion || '1.0'}\n`;
+                        userDetails += `📅 *تاريخ التسجيل:* ${verifiedDate.toLocaleDateString('ar-EG')} ${verifiedDate.toLocaleTimeString('ar-EG')}\n`;
+                        userDetails += `⏳ *الصلاحية:* ${daysLeft} يوم\n`;
+                        userDetails += `🌐 *IP:* ${userData.ip || 'غير معروف'}\n\n`;
+                        
+                        userDetails += `🔧 *إجراءات التحكم:*\n\n`;
+                        userDetails += `1️⃣ - تحديث وقت الاشتراك\n`;
+                        userDetails += `2️⃣ - حظر الجهاز\n`;
+                        userDetails += `3️⃣ - فك حظر الجهاز\n`;
+                        userDetails += `4️⃣ - حذف المستخدم\n\n`;
+                        userDetails += `❌ *إلغاء* للإلغاء`;
+                        
+                        // حفظ بيانات المستخدم في الحالة
+                        currentState.targetDeviceId = userData.deviceId;
+                        currentState.targetAppName = userData.appName;
+                        currentState.targetPhone = userData.phone;
+                        currentState.step = "waiting_user_action";
+                        telegramStates.set(chatId, currentState);
+                        
+                        await sendTelegram(chatId, userDetails);
+                    }
+                    
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_user_action") {
+                    if (text === "1") {
+                        // تحديث وقت الاشتراك
+                        currentState.step = "waiting_expiry_days";
+                        telegramStates.set(chatId, currentState);
+                        await sendTelegram(chatId, "📅 أرسل *عدد الأيام* الجديد للاشتراك (مثال: 30):");
+                    }
+                    else if (text === "2") {
+                        // حظر الجهاز
+                        currentState.step = "waiting_ban_reason";
+                        telegramStates.set(chatId, currentState);
+                        await sendTelegram(chatId, "📝 أرسل *سبب الحظر*:");
+                    }
+                    else if (text === "3") {
+                        // فك حظر الجهاز
+                        const success = await unbanDevice(currentState.targetDeviceId, currentState.targetPhone, chatId);
+                        
+                        if (success) {
+                            await sendTelegram(chatId, `✅ *تم فك حظر الجهاز بنجاح!*`);
+                        } else {
+                            await sendTelegram(chatId, `❌ *الجهاز غير محظور أو فشل فك الحظر!*`);
+                        }
+                        
+                        telegramStates.delete(chatId);
+                    }
+                    else if (text === "4") {
+                        // حذف المستخدم
+                        const success = await deleteUser(currentState.targetDeviceId, currentState.targetAppName, chatId);
+                        
+                        if (success) {
+                            await sendTelegram(chatId, `✅ *تم حذف المستخدم بنجاح!*`);
+                        } else {
+                            await sendTelegram(chatId, `❌ *فشل حذف المستخدم!*`);
+                        }
+                        
+                        telegramStates.delete(chatId);
+                    }
+                    else {
+                        await sendTelegram(chatId, "❌ اختيار غير صحيح");
+                    }
+                    
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_expiry_days") {
+                    const days = parseInt(text);
+                    if (isNaN(days) || days <= 0) {
+                        await sendTelegram(chatId, "❌ أرسل رقماً صحيحاً للأيام");
+                        return res.sendStatus(200);
+                    }
+                    
+                    const expiryDate = new Date();
+                    expiryDate.setDate(expiryDate.getDate() + days);
+                    
+                    const success = await updateUserSubscription(currentState.targetDeviceId, currentState.targetAppName, expiryDate.toISOString());
+                    
+                    if (success) {
+                        await sendTelegram(chatId, `✅ *تم تحديث الاشتراك بنجاح!*\n\n⏳ الصلاحية الجديدة: ${days} يوم (تنتهي ${expiryDate.toLocaleDateString('ar-EG')})`);
+                    } else {
+                        await sendTelegram(chatId, "❌ *فشل تحديث الاشتراك!*");
+                    }
+                    
+                    telegramStates.delete(chatId);
+                    return res.sendStatus(200);
+                }
+                
+                if (currentState.step === "waiting_ban_reason") {
+                    const success = await banDevice(currentState.targetDeviceId, currentState.targetPhone, text, chatId);
+                    
+                    if (success) {
+                        await sendTelegram(chatId, `✅ *تم حظر الجهاز بنجاح!*\n\n📝 السبب: ${text}`);
+                    } else {
+                        await sendTelegram(chatId, "❌ *فشل حظر الجهاز!*");
+                    }
+                    
+                    telegramStates.delete(chatId);
+                    return res.sendStatus(200);
+                }
+            }
+            
+            // ========== أمر حضر (محسن) ==========
             if (currentState.command === "حظر") {
                 if (currentState.step === "waiting_device_id") {
                     currentState.deviceId = text;
@@ -731,6 +1026,7 @@ app.post("/telegram-webhook", async (req, res) => {
                 }
             }
             
+            // ========== أمر فك حظر ==========
             if (currentState.command === "فك حظر") {
                 if (currentState.step === "waiting_device_id") {
                     currentState.deviceId = text;
@@ -756,6 +1052,7 @@ app.post("/telegram-webhook", async (req, res) => {
                 }
             }
             
+            // ========== أمر حذف مستخدم ==========
             if (currentState.command === "حذف مستخدم") {
                 if (currentState.step === "waiting_device_id") {
                     currentState.deviceId = text;
@@ -789,19 +1086,52 @@ app.post("/telegram-webhook", async (req, res) => {
             telegramStates.set(chatId, { command: "نشر", step: "waiting_link" });
             await sendTelegram(chatId, "🔗 *خطوة 1/3*\nأرسل *الرابط* الآن:");
         }
+        else if (text === "نجم تحكم") {
+            // أمر تحكم جديد
+            const usersSnapshot = await db.collection('users').get();
+            const appNames = [...new Set(usersSnapshot.docs.map(d => d.data().appName))].filter(name => name);
+            
+            if (appNames.length === 0) {
+                await sendTelegram(chatId, "📭 لا توجد تطبيقات مسجلة بعد.");
+                return res.sendStatus(200);
+            }
+            
+            telegramStates.set(chatId, { command: "تحكم", step: "waiting_app_selection" });
+            
+            let menu = "🎯 *اختر التطبيق:*\n\n";
+            menu += "0 - 🌐 *الجميع*\n\n";
+            appNames.forEach((app, index) => {
+                menu += `${index + 1} - 📱 *${app}*\n`;
+            });
+            menu += "\n💡 أرسل رقم الخيار المطلوب.\n";
+            menu += "❌ أرسل *إلغاء* للإلغاء.";
+            
+            await sendTelegram(chatId, menu);
+        }
         else if (text === "نجم احصا") {
             const usersSnap = await db.collection('users').get();
             const bannedSnap = await db.collection('banned').get();
             const pendingSnap = await db.collection('pending_codes').get();
             
             const appStats = {};
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            
+            let newToday = 0;
+            
             usersSnap.docs.forEach(doc => {
                 const appName = doc.data().appName || 'غير معروف';
                 appStats[appName] = (appStats[appName] || 0) + 1;
+                
+                const verifiedDate = doc.data().verifiedAt?.toDate?.();
+                if (verifiedDate && verifiedDate >= today) {
+                    newToday++;
+                }
             });
             
             let statsText = "📊 *إحصائيات النظام:*\n\n";
             statsText += `👥 *إجمالي المستخدمين:* ${usersSnap.size}\n`;
+            statsText += `🆕 *جديد اليوم:* ${newToday}\n`;
             statsText += `🚫 *الأجهزة المحظورة:* ${bannedSnap.size}\n`;
             statsText += `⏳ *الطلبات المعلقة:* ${pendingSnap.size}\n\n`;
             statsText += "📱 *حسب التطبيق:*\n";
@@ -861,6 +1191,7 @@ app.post("/telegram-webhook", async (req, res) => {
         else {
             const helpText = `🌟 *الأوامر المتاحة:*\n\n` +
                             `📢 *نجم نشر* - لنشر إعلان جديد\n` +
+                            `🎮 *نجم تحكم* - للتحكم بالمستخدمين (جديد)\n` +
                             `📊 *نجم احصا* - لعرض الإحصائيات\n` +
                             `⚡ *نجم حالة* - لعرض حالة البوت\n` +
                             `🚫 *نجم حضر* - لحظر جهاز أو رقم\n` +
